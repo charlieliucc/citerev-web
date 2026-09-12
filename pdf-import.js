@@ -4,8 +4,8 @@
   let pdfjsPromise;
   function loadPdfJs() {
     if (!pdfjsPromise) {
-      pdfjsPromise = import('./vendor/pdfjs/pdf.mjs?v=20260911-pdf2').then(pdfjs => {
-        pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.mjs', document.baseURI).href;
+      pdfjsPromise = import('./vendor/pdfjs/pdf.mjs?v=20260912-pdf-legacy1').then(pdfjs => {
+        pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.mjs?v=20260912-pdf-legacy1', document.baseURI).href;
         return pdfjs;
       });
     }
