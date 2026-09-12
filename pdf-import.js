@@ -4,12 +4,53 @@
   let pdfjsPromise;
   function loadPdfJs() {
     if (!pdfjsPromise) {
-      pdfjsPromise = import('./vendor/pdfjs/pdf.mjs?v=20260912-pdf-legacy1').then(pdfjs => {
-        pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.mjs?v=20260912-pdf-legacy1', document.baseURI).href;
+      pdfjsPromise = import('./vendor/pdfjs/pdf.mjs?v=20260912-pdf-reader1').then(pdfjs => {
+        pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.mjs?v=20260912-pdf-reader1', document.baseURI).href;
         return pdfjs;
       });
     }
     return pdfjsPromise;
+  }
+
+  function supportsReadableStreamAsyncIteration() {
+    const asyncIterator = typeof Symbol !== 'undefined' && Symbol.asyncIterator;
+    return typeof global.ReadableStream !== 'undefined' && !!asyncIterator && typeof global.ReadableStream.prototype?.[asyncIterator] === 'function';
+  }
+
+  async function readTextContentFromReader(page, params = {}) {
+    const readableStream = page.streamTextContent(params);
+    if (!readableStream || typeof readableStream.getReader !== 'function') {
+      throw new Error('当前浏览器不支持 PDF 文本流读取');
+    }
+    const reader = readableStream.getReader();
+    const textContent = {
+      items: [],
+      styles: Object.create(null),
+      lang: null
+    };
+    let completed = false;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        textContent.lang ??= value.lang;
+        Object.assign(textContent.styles, value.styles);
+        textContent.items.push(...(value.items || []));
+      }
+      completed = true;
+      return textContent;
+    } finally {
+      if (!completed && typeof reader.cancel === 'function') {
+        try { await reader.cancel(); } catch (_) {}
+      }
+      if (typeof reader.releaseLock === 'function') reader.releaseLock();
+    }
+  }
+
+  async function getTextContentCompat(page, params = {}) {
+    if (supportsReadableStreamAsyncIteration()) return page.getTextContent(params);
+    return readTextContentFromReader(page, params);
   }
 
   const esc = value => String(value || '').replace(/[&<>"']/g, char => ({
@@ -213,7 +254,7 @@
       onProgress?.(pageNumber, pdf.numPages);
       const page = await pdf.getPage(pageNumber);
       await page.getOperatorList({ intent: 'display' });
-      const textContent = await page.getTextContent();
+      const textContent = await getTextContentCompat(page);
       const lines = pageLines(page, pageNumber, pageLabels?.[pageNumber - 1] || String(pageNumber), textContent);
       characterCount += lines.reduce((sum, line) => sum + line.text.length, 0);
       pages.push(lines);
@@ -268,7 +309,7 @@
       await page.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }).promise;
       if (serial !== renderSerial) return;
       textLayer.replaceChildren();
-      const content = await page.getTextContent();
+      const content = await getTextContentCompat(page);
       const layer = new pdfjs.TextLayer({ textContentSource: content, container: textLayer, viewport });
       await layer.render();
       if (serial !== renderSerial) return;
