@@ -320,7 +320,7 @@
         if(!/[A-Za-z\u00C0-\u017F]/.test(ap)) continue;
         const { authors, etal } = parseInTextAuthorList(ap, { allowAnd:false });
         if(authors.length === 0) continue;
-        citations.push({ authorsRaw: ap, year: normalizeYear(years[0]), authors, etal, raw: `(${chunk})`, start: pm.index, end: pm.index + pm[0].length });
+        citations.push({ authorsRaw: ap, year: normalizeYear(years[0]), authors, etal, citationType: 'parenthetical', raw: `(${chunk})`, start: pm.index, end: pm.index + pm[0].length });
       }
     }
 
@@ -339,7 +339,7 @@
       if(!authorToken || stopwords.has(firstWord)) continue;
       const { authors, etal } = parseInTextAuthorList(authorToken, { allowAnd:true });
       if(authors.length === 0) continue;
-      citations.push({ authorsRaw: authorToken, year: normalizeYear(nm[2]), authors, etal, raw: nm[0], start: nm.index, end: nm.index + nm[0].length });
+      citations.push({ authorsRaw: authorToken, year: normalizeYear(nm[2]), authors, etal, citationType: 'narrative', raw: nm[0], start: nm.index, end: nm.index + nm[0].length });
     }
 
     return citations;

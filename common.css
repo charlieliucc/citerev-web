@@ -189,6 +189,12 @@ ol.doc-refs li em{ font-style: italic; }
   border-radius:6px; background:#fff; color:var(--td-text); cursor:pointer; font-size:16px;
 }
 .pdf-source-toolbar button:hover{ background:#f5f7fa; border-color:#c9cdd4; }
+.pdf-source-toolbar label{ display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+.pdf-source-toolbar input[data-pdf-page-input]{ width:48px; height:28px; padding:0 6px; border:1px solid var(--td-border); border-radius:6px; color:var(--td-text); background:#fff; text-align:center; font-size:12px; font-variant-numeric:tabular-nums; }
+.pdf-source-toolbar input[data-pdf-page-input]:focus{ outline:2px solid rgba(22,119,255,.22); outline-offset:1px; border-color:#1677ff; }
+.pdf-source-toolbar input[data-pdf-page-input][aria-invalid="true"]{ border-color:#d9363e; color:#d9363e; }
+.pdf-page-label{ color:var(--td-muted); white-space:nowrap; }
+.pdf-page-error{ color:#d9363e; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pdf-toolbar-gap{ width:18px; }
 .pdf-page-stage{ overflow:auto; padding:20px 14px 32px; background:#e9edf3; text-align:center; }
 .pdf-page-surface{

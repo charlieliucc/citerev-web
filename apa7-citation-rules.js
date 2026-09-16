@@ -3,7 +3,11 @@
   // 分类体系：mismatch（红）＝ 引用不匹配/结构问题；style（橙）＝ 样式警告
   // 每个 comment 携带 start/end，供左侧正文高亮定位
   // ==================================================================
-  function isNarrativeCitation(c){ return !/^\(.*\)$/.test((c.raw || "").trim()); }
+  function isNarrativeCitation(c){
+    if(c && (c.citationType === 'parenthetical' || c.citationType === 'narrative')) return c.citationType === 'narrative';
+    const raw = String(c?.raw || '').trim();
+    return !(raw.startsWith('(') && raw.endsWith(')'));
+  }
   function splitSubCitesInChunk(chunkText){
     let s = String(chunkText || '').replace(/\s+/g, ' ').trim().replace(/^\(+/, "").replace(/\)+$/, "");
     return s.split(/\s*;\s*/).map(x => x.trim()).filter(Boolean);

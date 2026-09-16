@@ -2,6 +2,7 @@
   "use strict";
 
   const MIN_REFERENCE_LENGTH=8;
+  const REFERENCE_HEADING_RE=/^[ \t#*0-9.)\-–—]*(?:references?|reference\s+list|works\s+cited|works\s+consulted|sources?|bibliograph(?:y|ies)|literature\s+cited|参考文献|参考资料)[ \t.:：·•0-9\-–—]*$/i;
 
   function normalizeBreaks(text=""){
     return String(text)
@@ -16,6 +17,10 @@
     const hasYear=/(?:^|[\s(,.;])(?:19|20)\d{2}[a-z]?(?:[\s),.;:]|$)/i.test(text);
     if(!hasYear)return false;
     return /^(?:[A-Z\p{Lu}][\p{L}'’.-]+(?:\s+[A-Z\p{Lu}][\p{L}'’.-]+){0,5}\s*,|[A-Z\p{Lu}][\p{L}'’.-]+\s+(?:[A-Z]\.?\s*){1,4}(?:,|\s)|[^.!?\n]{2,120}\.\s*\((?:19|20)\d{2}|[\p{Script=Han}]{2,}(?:[，,、]|\s))/u.test(text);
+  }
+
+  function isReferenceHeading(line=""){
+    return REFERENCE_HEADING_RE.test(String(line||"").trim());
   }
 
   function isReferenceEndHeading(line=""){
@@ -33,6 +38,22 @@
       offset+=line.length+1;
     }
     return source.length;
+  }
+
+  // 对纯文本行、Word 段落和 PDF 行统一返回分段边界。
+  function findDocumentSectionBounds(items=[],getText=item=>item&&item.text||""){
+    const list=Array.isArray(items)?items:[];
+    let headingIndex=-1;
+    for(let i=list.length-1;i>=0;i--){
+      const text=String(getText(list[i])||"").trim();
+      if(text.length<=60&&isReferenceHeading(text)){headingIndex=i;break;}
+    }
+    if(headingIndex<0)return{found:false,headingIndex:-1,referenceStart:-1,referenceEnd:list.length,appendixIndex:-1};
+    let appendixIndex=list.length;
+    for(let i=headingIndex+1;i<list.length;i++){
+      if(isReferenceEndHeading(getText(list[i]))){appendixIndex=i;break;}
+    }
+    return{found:true,headingIndex,referenceStart:headingIndex+1,referenceEnd:appendixIndex,appendixIndex};
   }
 
   function splitReferences(text=""){
@@ -88,17 +109,22 @@
 
   function splitDocumentSections(text=""){
     const source=normalizeBreaks(text);
-    const heading=/(^|\n)[ \t#*0-9.)\-–—]*(?:references?|reference\s+list|works\s+cited|bibliograph(?:y|ies)|literature\s+cited|参考文献|参考资料)[ \t.:：·•0-9\-–—]*(?=\n|$)/gi;
-    let match,last=null;
-    while((match=heading.exec(source)))last={start:match.index+match[1].length,end:heading.lastIndex,label:match[0].trim()};
-    if(!last)return{found:false,body:"",references:source.trim(),heading:""};
-    const referenceSource=source.slice(last.end);
-    const endOffset=referenceEndOffset(referenceSource);
+    const lines=source.split("\n");
+    const bounds=findDocumentSectionBounds(lines,line=>line);
+    if(!bounds.found)return{found:false,body:"",references:source.trim(),heading:"",appendix:"",bounds};
+    const lineOffset=index=>lines.slice(0,index).reduce((n,line)=>n+line.length+1,0);
+    const headingStart=lineOffset(bounds.headingIndex);
+    const referenceStart=lineOffset(bounds.referenceStart);
+    const referenceEnd=lineOffset(bounds.referenceEnd);
+    const bodyParts=[source.slice(0,headingStart),bounds.appendixIndex<lines.length?source.slice(referenceEnd):""]
+      .map(x=>x.trim()).filter(Boolean);
     return{
       found:true,
-      body:source.slice(0,last.start).trim(),
-      references:referenceSource.slice(0,endOffset).trim(),
-      heading:last.label
+      body:bodyParts.join("\n\n"),
+      references:source.slice(referenceStart,referenceEnd).trim(),
+      appendix:bounds.appendixIndex<lines.length?source.slice(referenceEnd).trim():"",
+      heading:lines[bounds.headingIndex].trim(),
+      bounds
     };
   }
 
@@ -136,7 +162,9 @@
     MIN_REFERENCE_LENGTH,
     normalizeBreaks,
     isLikelyReferenceStart,
+    isReferenceHeading,
     isReferenceEndHeading,
+    findDocumentSectionBounds,
     splitReferences,
     splitDocumentSections,
     groupReferenceLines

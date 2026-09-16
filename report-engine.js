@@ -109,12 +109,11 @@
   }
   async function parseDocx(file){
     const buffer=await file.arrayBuffer(),bytes=new Uint8Array(buffer),view=new DataView(buffer),documentEntry=zipEntry(bytes,view,"word/document.xml");if(!documentEntry)throw new Error("未找到 Word 正文");
-    const footnotePages=new Map(),xml=await inflateEntry(documentEntry),hasPageInfo=/<w:lastRenderedPageBreak\b|<w:br\b[^>]*w:type=["']page["']/i.test(xml),paras=documentParagraphs(xml,footnotePages),footnoteXml=await inflateEntry(zipEntry(bytes,view,"word/footnotes.xml")),footnotes=footnoteParagraphs(footnoteXml,footnotePages),full=paras.map(x=>x.text).join("\n"),sections=global.CitationReferenceSplitter.splitDocumentSections(full);
+    const footnotePages=new Map(),xml=await inflateEntry(documentEntry),hasPageInfo=/<w:lastRenderedPageBreak\b|<w:br\b[^>]*w:type=["']page["']/i.test(xml),paras=documentParagraphs(xml,footnotePages),footnoteXml=await inflateEntry(zipEntry(bytes,view,"word/footnotes.xml")),footnotes=footnoteParagraphs(footnoteXml,footnotePages),full=paras.map(x=>x.text).join("\n"),sections=global.CitationReferenceSplitter.findDocumentSectionBounds(paras,p=>p&&p.text);
     if(!hasPageInfo)paras.forEach(p=>{p.page=null;});
     if(!sections.found)return{body:"",references:full,text:full,bodyBlocks:[],referenceBlocks:global.CitationReferenceSplitter.groupReferenceLines(paras).map(combineParagraphs),hasPageInfo};
-    let headingIndex=-1;for(let i=paras.length-1;i>=0;i--)if(/^(?:references?|reference\s+list|works\s+cited|bibliograph(?:y|ies)|literature\s+cited|参考文献|参考资料)[\s.:：·•0-9\-–—]*$/i.test(paras[i].text)){headingIndex=i;break;}
-    const bodyParas=paras.slice(0,headingIndex),referenceParas=paras.slice(headingIndex+1),bodyBlocks=[...bodyParas,...footnotes],referenceBlocks=global.CitationReferenceSplitter.groupReferenceLines(referenceParas).map(combineParagraphs),bodyText=bodyBlocks.map(x=>x.text).join("\n"),referenceText=referenceBlocks.map(x=>x.text).join("\n\n");
-    return{body:bodyText,references:referenceText,bodyBlocks,referenceBlocks,text:bodyText+"\n\nReferences\n"+referenceText,footnoteCount:footnotes.length,hasPageInfo};
+    const bodyParas=[...paras.slice(0,sections.headingIndex),...paras.slice(sections.appendixIndex)],referenceParas=paras.slice(sections.referenceStart,sections.referenceEnd),bodyBlocks=[...bodyParas,...footnotes],referenceBlocks=global.CitationReferenceSplitter.groupReferenceLines(referenceParas).map(combineParagraphs),bodyText=bodyBlocks.map(x=>x.text).join("\n"),referenceText=referenceBlocks.map(x=>x.text).join("\n\n");
+    return{body:bodyText,references:referenceText,bodyBlocks,referenceBlocks,text:full,footnoteCount:footnotes.length,hasPageInfo};
   }
   global.CitationReportEngine=Object.freeze({localAnalysis,distributionAnalysis,distribution,verifyAll,parseDocx});
 })(window);

@@ -463,16 +463,10 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     return html;
   }
 
-  const REF_HEADING_RE = /^\s*(?:\d+[\.\)]\s*)?(references?|bibliograph(?:y|ies)|works\s+cited|works\s+consulted|literature\s+cited|reference\s+list|sources?)\b/i;
-
   function splitBodyAndReferences(doc){
     const paras = (doc && doc.paragraphs) ? doc.paragraphs : [];
-    let headingIdx = -1;
-    for(let i = 0; i < paras.length; i++){
-      const line = (paras[i].text || "").trim();
-      if(!line) continue;
-      if(line.length <= 60 && REF_HEADING_RE.test(line)){ headingIdx = i; break; }
-    }
+    const bounds = window.CitationReferenceSplitter.findDocumentSectionBounds(paras, p => p?.text);
+    const headingIdx = bounds.headingIndex;
 
     if(headingIdx < 0){
       const bodyParagraphs = paras.map(p => ({ text: p.text, page: p.page })).filter(p => p.text);
@@ -484,9 +478,10 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       };
     }
 
-    const bodyLines = paras.slice(0, headingIdx).map(p => p.text).filter(Boolean);
-    const bodyParagraphs = paras.slice(0, headingIdx).map(p => ({ text: p.text, page: p.page })).filter(p => p.text);
-    let refParas = paras.slice(headingIdx + 1);
+    const bodySourceParas = [...paras.slice(0, headingIdx), ...paras.slice(bounds.appendixIndex)];
+    const bodyLines = bodySourceParas.map(p => p.text).filter(Boolean);
+    const bodyParagraphs = bodySourceParas.map(p => ({ text: p.text, page: p.page })).filter(p => p.text);
+    let refParas = paras.slice(bounds.referenceStart, bounds.referenceEnd);
     const TRAILING_META_RE = /^\s*(word\s*count|words\s*:|page\s*count|pages\s*:|character\s*count|characters\s*:)/i;
     const refParasFiltered = refParas.filter(p => !TRAILING_META_RE.test(p.text || ""));
     const excluded = refParas.length - refParasFiltered.length;

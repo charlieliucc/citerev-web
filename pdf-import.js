@@ -56,10 +56,21 @@
   const esc = value => String(value || '').replace(/[&<>"']/g, char => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[char]);
-  const headingPattern = /^(?:references?|reference\s+list|works\s+cited|bibliograph(?:y|ies)|literature\s+cited|参考文献|参考资料)[\s.:：·•0-9\-–—]*$/i;
 
   function cleanText(value) {
     return String(value || '').replace(/\u0000/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function resolvePageNumber(value, labels, pageCount) {
+    const query = String(value || '').trim();
+    if (!query) return null;
+    const labelsIndex = (labels || []).findIndex(label => String(label || '').trim().toLowerCase() === query.toLowerCase());
+    if (labelsIndex >= 0 && labelsIndex < pageCount) return labelsIndex + 1;
+    if (/^\d+$/.test(query)) {
+      const number = Number(query);
+      if (number >= 1 && number <= pageCount) return number;
+    }
+    return null;
   }
 
   function fontInfo(page, item, styles) {
@@ -216,12 +227,9 @@
   }
 
   function documentFromLines(lines, pageCount, pageLabels) {
-    let headingIndex = -1;
-    for (let index = lines.length - 1; index >= 0; index--) {
-      if (headingPattern.test(cleanText(lines[index].text))) { headingIndex = index; break; }
-    }
-    const bodyLines = headingIndex >= 0 ? lines.slice(0, headingIndex) : [];
-    const referenceLines = headingIndex >= 0 ? lines.slice(headingIndex + 1) : lines;
+    const bounds = global.CitationReferenceSplitter?.findDocumentSectionBounds(lines, line => cleanText(line?.text)) || { found: false, headingIndex: -1, referenceStart: -1, referenceEnd: lines.length, appendixIndex: -1 };
+    const bodyLines = bounds.found ? [...lines.slice(0, bounds.headingIndex), ...lines.slice(bounds.appendixIndex)] : [];
+    const referenceLines = bounds.found ? lines.slice(bounds.referenceStart, bounds.referenceEnd) : lines;
     const grouped = global.CitationReferenceSplitter?.groupReferenceLines(referenceLines, line => line?.text) || referenceLines.map(line => [line]);
     const bodyBlocks = bodyLines.map(line => combineLines([line]));
     const referenceBlocks = grouped.map(combineLines).filter(block => block.text);
@@ -230,7 +238,7 @@
     return {
       body,
       references,
-      text: headingIndex >= 0 ? body + '\n\nReferences\n' + references : references,
+      text: lines.map(line => line?.text || '').filter(Boolean).join('\n'),
       bodyBlocks,
       referenceBlocks,
       hasPageInfo: true,
@@ -274,9 +282,11 @@
 
   function createViewer(container) {
     let pdf = null, loadingTask = null, pdfjs = null, pageNumber = 1, zoom = 1, labels = null, selectedAnchor = null, renderSerial = 0;
-    container.innerHTML = '<div class="pdf-source-toolbar"><button type="button" data-pdf-action="prev" aria-label="上一页">‹</button><span>第 <b data-pdf-current>1</b> / <b data-pdf-total>1</b> 页</span><button type="button" data-pdf-action="next" aria-label="下一页">›</button><span class="pdf-toolbar-gap"></span><button type="button" data-pdf-action="out" aria-label="缩小">−</button><span data-pdf-zoom>100%</span><button type="button" data-pdf-action="in" aria-label="放大">＋</button></div><div class="pdf-page-stage"><div class="pdf-page-surface"><canvas></canvas><div class="pdf-text-layer textLayer"></div><div class="pdf-highlight-layer"></div></div></div>';
-    const currentEl = container.querySelector('[data-pdf-current]');
+    container.innerHTML = '<div class="pdf-source-toolbar"><button type="button" data-pdf-action="prev" aria-label="上一页">‹</button><label>第 <input type="text" inputmode="text" data-pdf-page-input value="1" aria-label="跳转到 PDF 页码"> / <b data-pdf-total>1</b> 页</label><button type="button" data-pdf-action="go" aria-label="跳转到页码">跳转</button><button type="button" data-pdf-action="next" aria-label="下一页">›</button><span data-pdf-page-label class="pdf-page-label"></span><span data-pdf-page-error class="pdf-page-error" role="status" aria-live="polite"></span><span class="pdf-toolbar-gap"></span><button type="button" data-pdf-action="out" aria-label="缩小">−</button><span data-pdf-zoom>100%</span><button type="button" data-pdf-action="in" aria-label="放大">＋</button></div><div class="pdf-page-stage"><div class="pdf-page-surface"><canvas></canvas><div class="pdf-text-layer textLayer"></div><div class="pdf-highlight-layer"></div></div></div>';
+    const pageInput = container.querySelector('[data-pdf-page-input]');
     const totalEl = container.querySelector('[data-pdf-total]');
+    const pageLabelEl = container.querySelector('[data-pdf-page-label]');
+    const pageErrorEl = container.querySelector('[data-pdf-page-error]');
     const zoomEl = container.querySelector('[data-pdf-zoom]');
     const stage = container.querySelector('.pdf-page-stage');
     const surface = container.querySelector('.pdf-page-surface');
@@ -284,9 +294,30 @@
     const textLayer = container.querySelector('.pdf-text-layer');
     const highlightLayer = container.querySelector('.pdf-highlight-layer');
 
-    function labelFor(number) {
-      const label = labels?.[number - 1];
-      return label && label !== String(number) ? number + '（' + label + '）' : String(number);
+    function clearPageError() {
+      pageErrorEl.textContent = '';
+      pageInput.removeAttribute('aria-invalid');
+    }
+
+    function updatePageControls() {
+      pageInput.value = String(pageNumber);
+      const label = labels?.[pageNumber - 1];
+      pageLabelEl.textContent = label && label !== String(pageNumber) ? `文档页码：${label}` : '';
+      clearPageError();
+    }
+
+    function showPageError(value) {
+      pageErrorEl.textContent = `找不到页码“${String(value || '').trim()}”`;
+      pageInput.setAttribute('aria-invalid', 'true');
+    }
+
+    async function goToPage(value) {
+      if (!pdf) return false;
+      const target = resolvePageNumber(value, labels, pdf.numPages);
+      if (!target) { showPageError(value); return false; }
+      pageNumber = target;
+      await render();
+      return true;
     }
 
     async function render() {
@@ -329,9 +360,9 @@
         marker.style.height = Math.max(3, Math.abs(rect[3] - rect[1])) + 'px';
         highlightLayer.appendChild(marker);
       }
-      currentEl.textContent = labelFor(pageNumber);
       totalEl.textContent = pdf.numPages;
       zoomEl.textContent = Math.round(zoom * 100) + '%';
+      updatePageControls();
     }
 
     async function load(bytes, pageLabels) {
@@ -345,6 +376,7 @@
       pdf = await loadingTask.promise;
       pageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber));
       totalEl.textContent = pdf.numPages;
+      updatePageControls();
       await render();
     }
 
@@ -365,7 +397,14 @@
       if (action === 'next') pageNumber = Math.min(pdf.numPages, pageNumber + 1);
       if (action === 'out') zoom = Math.max(0.6, zoom - 0.15);
       if (action === 'in') zoom = Math.min(2.5, zoom + 0.15);
+      if (action === 'go') { goToPage(pageInput.value); return; }
       render();
+    });
+
+    pageInput.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      goToPage(pageInput.value);
     });
 
     async function destroy() {
@@ -379,8 +418,8 @@
       highlightLayer.replaceChildren();
     }
 
-    return { load, locate, render, destroy, get pageNumber() { return pageNumber; } };
+    return { load, locate, goToPage, render, destroy, get pageNumber() { return pageNumber; } };
   }
 
-  global.CitationPdfImporter = Object.freeze({ parse, createViewer, loadPdfJs });
+  global.CitationPdfImporter = Object.freeze({ parse, createViewer, loadPdfJs, resolvePageNumber });
 })(window);

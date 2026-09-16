@@ -222,23 +222,13 @@ function docxXmlToText(xml){
 // —— 段落级切分正文/参考文献（对齐 index.html 的 splitBodyAndReferences）——
 // 按“参考文献标题”段定位（容忍「1. References」「2) References」等编号；标题长度限制防止误命中正文里的词）；
 // 命中后取标题之后所有段为参考文献，并过滤文档尾部统计信息（Word count 等）。
-const REF_HEADING_RE=/^\s*(?:\d+[\.\)]\s*)?(references?|bibliograph(?:y|ies)|works\s+cited|works\s+consulted|literature\s+cited|reference\s+list|sources?)\b/i;
 const TRAILING_META_RE=/^\s*(word\s*count|words\s*:|page\s*count|pages\s*:|character\s*count|characters\s*:)/i;
 function splitBodyAndReferences(paragraphs){
-  let headingIdx=-1;
-  for(let i=0;i<paragraphs.length;i++){
-    const line=(paragraphs[i].text||"").trim();
-    if(!line)continue;
-    if(line.length<=60&&REF_HEADING_RE.test(line)){headingIdx=i;break;}
-  }
-  if(headingIdx<0)return{found:false,refsParagraphs:[],headingText:""};
-  let endIdx=paragraphs.length;
-  for(let i=headingIdx+1;i<paragraphs.length;i++){
-    if(isReferenceEndHeading(paragraphs[i].text||"")){endIdx=i;break;}
-  }
-  let refParas=paragraphs.slice(headingIdx+1,endIdx);
+  const bounds=window.CitationReferenceSplitter?.findDocumentSectionBounds(paragraphs,p=>p&&p.text)||{found:false,headingIndex:-1,referenceStart:-1,referenceEnd:paragraphs.length,appendixIndex:-1};
+  if(!bounds.found)return{found:false,refsParagraphs:[],headingText:""};
+  let refParas=paragraphs.slice(bounds.referenceStart,bounds.referenceEnd);
   const filtered=refParas.filter(p=>!TRAILING_META_RE.test(p.text||""));
-  return{found:true,refsParagraphs:filtered,headingText:paragraphs[headingIdx].text};
+  return{found:true,refsParagraphs:filtered,headingText:paragraphs[bounds.headingIndex].text};
 }
 async function extractDocxText(arrayBuffer){
   const bytes=new Uint8Array(arrayBuffer);
