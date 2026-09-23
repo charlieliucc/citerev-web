@@ -37,9 +37,9 @@
     setTimeout(tick, 320);
   }
   const engineReady = window.CitationReportEngine?.parseDocx ? Promise.resolve() : new Promise((resolve, reject) => { const script = document.createElement('script'); script.src = 'report-engine.js?v=20260916-appendix1'; script.onload = resolve; script.onerror = () => reject(new Error('Word 解析模块加载失败')); document.head.appendChild(script); });
-  let doc = { fileName: '', sourceType: 'paste', fullText: '', fullHtml: '', bodyText: '', referencesText: '', referencesHtml: '', bodyBlocks: [], referenceBlocks: [], hasPageInfo: false, pdfBytes: null, pageCount: 0, pageLabels: null };
+  let doc = { fileName: '', sourceType: 'paste', fullText: '', fullHtml: '', bodyText: '', referencesText: '', referencesHtml: '', bodyBlocks: [], referenceBlocks: [], hasPageInfo: false, pdfBytes: null, docxBytes: null, docxToken: null, pageCount: 0, pageLabels: null };
   let framePdfSent = false;
-  function save() { try { const { pdfBytes, ...persisted } = doc; sessionStorage.setItem(KEY, JSON.stringify(persisted)); } catch (_) {} }
+  function save() { try { const { pdfBytes, docxBytes, ...persisted } = doc; sessionStorage.setItem(KEY, JSON.stringify(persisted)); } catch (_) {} }
   function load() { try { const x = JSON.parse(sessionStorage.getItem(KEY) || 'null'); if (x && typeof x === 'object') doc = Object.assign(doc, x); } catch (_) {} }
   function splitText(text) { const s = window.CitationReferenceSplitter?.splitDocumentSections(text) || { found: false, body: '', references: text }; return { bodyText: s.found ? s.body : '', referencesText: (s.found ? s.references : text).trim() }; }
   function setMessage(text, error) { message.textContent = text || ''; message.className = error ? 'workspace-message error' : 'workspace-message'; }
@@ -70,7 +70,7 @@
   function syncFrame() { markFrameEmbedded(); send(); setTimeout(send, 100); setTimeout(send, 400); }
   function selectFeature(key) { preferredTab = routes[key] ? key : 'full'; document.querySelectorAll('[data-start-feature]').forEach(button => { const active = button.dataset.startFeature === preferredTab; button.classList.toggle('active', active); button.setAttribute('aria-pressed', active ? 'true' : 'false'); }); const pasted = inputText(); if (!doc.fullText && pasted) return setDocument(pasted, { sourceType: 'paste' }); if (doc.fullText) { updateStart(false); openTab(preferredTab); } else setMessage('请先粘贴论文全文或参考文献，或导入 Word / PDF 文档。'); }
   function openTab(key) { preferredTab = routes[key] ? key : 'full'; framePdfSent = false; setStartActive(false); tabs.forEach(t => { const active = t.dataset.workspaceTab === preferredTab; t.classList.toggle('active', active); if (active) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); }); frame.src = routes[preferredTab] + '?embed=1'; }
-  function setDocument(text, meta) { const parts = splitText(text),fullHtml=safePasteHtml(input.innerHTML); doc = Object.assign(doc, { ...parts, fullText: text.trim(), fullHtml, referencesHtml: referenceHtmlFromFull(fullHtml), sourceType: meta?.sourceType || 'paste', fileName: meta?.fileName || '', bodyBlocks: [], referenceBlocks: [], hasPageInfo: false, pdfBytes: null, pageCount: 0, pageLabels: null }); save(); updateStart(); openTab(preferredTab); setMessage('文档已准备好，已进入“' + labels[preferredTab] + '”。'); }
+  function setDocument(text, meta) { const parts = splitText(text),fullHtml=safePasteHtml(input.innerHTML); doc = Object.assign(doc, { ...parts, fullText: text.trim(), fullHtml, referencesHtml: referenceHtmlFromFull(fullHtml), sourceType: meta?.sourceType || 'paste', fileName: meta?.fileName || '', bodyBlocks: [], referenceBlocks: [], hasPageInfo: false, pdfBytes: null, docxBytes: null, docxToken: null, pageCount: 0, pageLabels: null }); save(); updateStart(); openTab(preferredTab); setMessage('文档已准备好，已进入“' + labels[preferredTab] + '”。'); }
   async function importFile() {
     const f = file.files?.[0];
     if (!f) return;
@@ -98,13 +98,15 @@
         referencesHtml: '',
         hasPageInfo: !!result.hasPageInfo,
         pdfBytes: result.pdfBytes || null,
+        docxBytes: isPdf ? null : new Uint8Array(await f.arrayBuffer()),
+        docxToken: isPdf ? null : String(Date.now()) + ':' + f.name,
         pageCount: result.pageCount || 0,
         pageLabels: result.pageLabels || null,
         styleInfoAvailable: result.styleInfoAvailable !== false
       });
       save();
       updateStart(true);
-      setMessage('已导入 ' + f.name + (isPdf ? '，已保留原版式与定位信息' : '') + '，点击「开始」进入“' + labels[preferredTab] + '”。');
+      setMessage('已导入 ' + f.name + (isPdf ? '，已保留原版式与定位信息' : '，可在审阅区查看原文排版') + '，点击「开始」进入“' + labels[preferredTab] + '”。');
     } catch (e) {
       setMessage((isPdf ? 'PDF' : 'Word') + ' 导入失败：' + (e.message || e), true);
     } finally { file.value = ''; }
@@ -123,8 +125,8 @@
   startNav.addEventListener('click', () => updateStart(true));
   $('workspaceImport').addEventListener('click', () => file.click()); file.addEventListener('change', importFile);
   input.addEventListener('paste', e => { const html = e.clipboardData?.getData('text/html'); if (!html) return; e.preventDefault(); const safe = safePasteHtml(html); document.execCommand('insertHTML', false, safe); });
-  $('workspaceClear').addEventListener('click', () => { doc = { fileName: '', sourceType: 'paste', fullText: '', fullHtml: '', bodyText: '', referencesText: '', referencesHtml: '', bodyBlocks: [], referenceBlocks: [], hasPageInfo: false, pdfBytes: null, pageCount: 0, pageLabels: null }; try { sessionStorage.removeItem(KEY); } catch (_) {} input.innerHTML=''; updateStart(); setMessage('已清空当前文档。'); });
+  $('workspaceClear').addEventListener('click', () => { doc = { fileName: '', sourceType: 'paste', fullText: '', fullHtml: '', bodyText: '', referencesText: '', referencesHtml: '', bodyBlocks: [], referenceBlocks: [], hasPageInfo: false, pdfBytes: null, docxBytes: null, docxToken: null, pageCount: 0, pageLabels: null }; try { sessionStorage.removeItem(KEY); } catch (_) {} input.innerHTML=''; updateStart(); setMessage('已清空当前文档。'); });
   tabs.forEach(t => t.addEventListener('click', () => selectFeature(t.dataset.workspaceTab))); frame.addEventListener('load', syncFrame);
-  window.addEventListener('message', e => { if (e.source !== frame.contentWindow || !acceptsOrigin(e) || !e.data) return; if (e.data.type === 'cr:request-document') send(); if (e.data.type === 'cr:document-update' && e.data.document) { doc = Object.assign(doc, e.data.document); save(); updateStart(); } });
+  window.addEventListener('message', e => { if (e.source !== frame.contentWindow || !acceptsOrigin(e) || !e.data) return; if (e.data.type === 'cr:request-document') send(); if (e.data.type === 'cr:document-update' && e.data.document) { const changed = e.data.document.bodyText !== doc.bodyText || e.data.document.referencesText !== doc.referencesText; doc = Object.assign(doc, e.data.document); if (changed && doc.sourceType === 'word') { doc.sourceType = 'paste'; doc.docxBytes = null; doc.docxToken = null; doc.bodyBlocks = []; doc.referenceBlocks = []; doc.hasPageInfo = false; } save(); updateStart(); } });
   startSloganTyping(); load(); updateStart(); if (doc.fullText) openTab('full');
 })();

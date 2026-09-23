@@ -148,80 +148,7 @@ function scanFromBottom(e){
 function groupRefParagraphs(paras){
   return groupReferenceLines(paras,p=>p&&p.text).map(group=>group.map(p=>p.text).join(" "));
 }
-// —— 导入 Word（.docx）文件：纯前端解析，无需外部库 ——
-// 利用浏览器内置 DecompressionStream 解压 ZIP 容器，再用 DOMParser 抽取正文（含 namespace 兜底）
-// 把 <w:p> 段落内的文本抽出来，并把软换行 <w:br>/<w:cr> 转成换行、<w:tab> 转成制表符
-// —— 工具：解码 XML 实体 ——
-function decodeXmlEntities(s){
-  return (s||"")
-    .replace(/&lt;/g,"<").replace(/&gt;/g,">")
-    .replace(/&quot;/g,'"').replace(/&apos;/g,"'")
-    .replace(/&#x([0-9a-fA-F]+);/g,(m,h)=>{try{return String.fromCodePoint(parseInt(h,16));}catch(e){return m;}})
-    .replace(/&#(\d+);/g,(m,d)=>{try{return String.fromCodePoint(parseInt(d,10));}catch(e){return m;}})
-    .replace(/&amp;/g,"&");
-}
-// —— 工具：判断某个 run 是否斜体（用于后续扩展保留格式，当前导入参考文献不影响切分）——
-function isDocxItalic(runInner){
-  const tags=runInner.match(/<w:i\b(?![Cs])([^>]*?)\/?>/gi);
-  if(!tags)return false;
-  for(const tag of tags){
-    const v=tag.match(/w:val="([^"]*)"/i);
-    if(v){const val=v[1].toLowerCase();if(val==="0"||val==="false"||val==="none")return false;return true;}
-    return true;
-  }
-  return false;
-}
-// —— 工具：检测 Word 分页符位置 ——
-function pageBreakIndices(s){
-  const idxs=[];let i;
-  i=-1;while((i=s.indexOf('<w:lastRenderedPageBreak',i+1))!==-1)idxs.push(i);
-  i=-1;while((i=s.indexOf('w:type="page"',i+1))!==-1)idxs.push(i);
-  i=-1;while((i=s.indexOf("w:type='page'",i+1))!==-1)idxs.push(i);
-  return idxs;
-}
-// —— 段落级解析：保留 <w:p> 段落边界 + 斜体 run（对齐 index.html 的 docxXmlToText，拆分为段落数组）——
-function docxXmlToText(xml){
-  const rawParas=xml.split(/<\/w:p>/gi);
-  const pageOf=new Array(rawParas.length).fill(1);
-  let cur=1;
-  for(let k=0;k<rawParas.length;k++){
-    const rp=rawParas[k];
-    const idxs=pageBreakIndices(rp);
-    const tIdx=rp.indexOf('<w:t');
-    const beforeIdx=tIdx<0?rp.length:tIdx;
-    let before=0,after=0;
-    for(const ix of idxs){if(ix<beforeIdx)before++;else after++;}
-    cur+=before;pageOf[k]=cur;cur+=after;
-  }
-  const norm=xml
-    .replace(/<w:br\s*\/?>/gi,"\n")
-    .replace(/<w:tab\s*\/?>/gi," ")
-    .replace(/<w:cr\s*\/?>/gi,"\n");
-  const paras=norm.split(/<\/w:p>/gi);
-  const out=[];
-  const runRe=/<w:r\b[^>]*>([\s\S]*?)<\/w:r>/gi;
-  const tRe=/<w:t[^>]*>([\s\S]*?)<\/w:t>/gi;
-  for(let pi=0;pi<paras.length;pi++){
-    const p=paras[pi];
-    const segments=[];let rm,hadRun=false;
-    runRe.lastIndex=0;
-    while((rm=runRe.exec(p))!==null){
-      hadRun=true;const runInner=rm[1];const italic=isDocxItalic(runInner);
-      tRe.lastIndex=0;let tm;
-      while((tm=tRe.exec(runInner))!==null){const txt=decodeXmlEntities(tm[1]);if(txt)segments.push({text:txt,italic});}
-    }
-    if(!hadRun){
-      tRe.lastIndex=0;let tm;
-      while((tm=tRe.exec(p))!==null){const txt=decodeXmlEntities(tm[1]);if(txt)segments.push({text:txt,italic:false});}
-    }
-    const text=segments.map(s=>s.text).join("").replace(/\s+/g," ").trim();
-    if(text.length>0)out.push({text,segments,page:pageOf[pi]});
-  }
-  return out.filter(x=>x.text.length>0);
-}
-// —— 段落级切分正文/参考文献（对齐 index.html 的 splitBodyAndReferences）——
-// 按“参考文献标题”段定位（容忍「1. References」「2) References」等编号；标题长度限制防止误命中正文里的词）；
-// 命中后取标题之后所有段为参考文献，并过滤文档尾部统计信息（Word count 等）。
+// 使用共享的 docxjs 导入器读取段落与格式。
 const TRAILING_META_RE=/^\s*(word\s*count|words\s*:|page\s*count|pages\s*:|character\s*count|characters\s*:)/i;
 function splitBodyAndReferences(paragraphs){
   const bounds=window.CitationReferenceSplitter?.findDocumentSectionBounds(paragraphs,p=>p&&p.text)||{found:false,headingIndex:-1,referenceStart:-1,referenceEnd:paragraphs.length,appendixIndex:-1};
@@ -229,50 +156,6 @@ function splitBodyAndReferences(paragraphs){
   let refParas=paragraphs.slice(bounds.referenceStart,bounds.referenceEnd);
   const filtered=refParas.filter(p=>!TRAILING_META_RE.test(p.text||""));
   return{found:true,refsParagraphs:filtered,headingText:paragraphs[bounds.headingIndex].text};
-}
-async function extractDocxText(arrayBuffer){
-  const bytes=new Uint8Array(arrayBuffer);
-  const view=new DataView(arrayBuffer);
-  // 定位 ZIP 中央目录结尾记录（EOCD）
-  let eocd=-1;
-  for(let i=bytes.length-22;i>=0;i--){
-    if(bytes[i]===0x50&&bytes[i+1]===0x4b&&bytes[i+2]===0x05&&bytes[i+3]===0x06){eocd=i;break;}
-  }
-  if(eocd<0)throw new Error("不是有效的 .docx 文件（找不到 ZIP 目录）");
-  const cdOffset=view.getUint32(eocd+16,true);
-  const cdCount=view.getUint16(eocd+10,true);
-  let p=cdOffset,targetOff=-1,targetMethod=-1,targetSize=-1;
-  for(let n=0;n<cdCount;n++){
-    if(!(bytes[p]===0x50&&bytes[p+1]===0x4b&&bytes[p+2]===0x01&&bytes[p+3]===0x02))break;
-    const method=view.getUint16(p+10,true);
-    const compSize=view.getUint32(p+20,true);
-    const nameLen=view.getUint16(p+28,true);
-    const extraLen=view.getUint16(p+30,true);
-    const commentLen=view.getUint16(p+32,true);
-    let fname="";for(let k=0;k<nameLen;k++)fname+=String.fromCharCode(bytes[p+46+k]);
-    const localOff=view.getUint32(p+42,true);
-    if(fname==="word/document.xml"){targetOff=localOff;targetMethod=method;targetSize=compSize;}
-    p+=46+nameLen+extraLen+commentLen;
-  }
-  if(targetOff<0)throw new Error("未在 .docx 中找到 word/document.xml");
-  const lNameLen=view.getUint16(targetOff+26,true);
-  const lExtraLen=view.getUint16(targetOff+28,true);
-  const dataStart=targetOff+30+lNameLen+lExtraLen;
-  const compData=bytes.subarray(dataStart,dataStart+targetSize);
-  let xmlBytes;
-  if(targetMethod===0){xmlBytes=compData;}
-  else if(targetMethod===8){
-    if(typeof DecompressionStream==="undefined")throw new Error("当前浏览器不支持解压，请改用 .txt 或更新浏览器");
-    const ds=new DecompressionStream("deflate-raw");
-    const stream=new Response(compData).body.pipeThrough(ds);
-    const buf=await new Response(stream).arrayBuffer();
-    xmlBytes=new Uint8Array(buf);
-  }else{throw new Error("不支持的压缩方式（method="+targetMethod+"）");}
-  const xml=new TextDecoder("utf-8").decode(xmlBytes);
-  const hasPageInfo=/<w:lastRenderedPageBreak|<w:br[^>]*\bw:type=["']page["']/i.test(xml);
-  let paragraphs=docxXmlToText(xml);
-  if(!hasPageInfo)paragraphs=paragraphs.map(p=>({...p,page:null}));
-  return{paragraphs,hasPageInfo};
 }
 // 作者名归一（风格感知）：IEEE 用“名首字母+姓、逗号分隔、and 连最后”；APA/MLA 用“姓, 名”配对；Vancouver 用“姓 名首字母”
 function normalizeAuthors(raw,style){
@@ -795,8 +678,7 @@ wordFileEl.addEventListener("change",async()=>{
       wordFileEl.value="";
       return;
     }
-    const buf=await file.arrayBuffer();
-    const {paragraphs}=await extractDocxText(buf);
+    const {paragraphs}=await CitationDocxImporter.parse(file);
     if(!paragraphs||!paragraphs.length){importMsg.textContent="文件已读取，但未提取到参考文献（可能是图片型或加密文档）";return;}
     let importText, foundNote="", count=0;
     // 优先用段落级切分（对齐 index.html）：按 References / Bibliography 等标题定位，取其之后段落

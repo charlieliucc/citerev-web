@@ -232,6 +232,9 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     currentSourceType = 'paste';
     currentPdfBytes = null;
     currentPdfLabels = null;
+    currentDocxBytes = null;
+    currentDocxKey = null;
+    if(docxViewer) docxViewer.clear();
     if(pdfViewer) pdfViewer.destroy();
     hidePageStatus();
     const tbClear = document.getElementById('txtBody');
@@ -246,207 +249,6 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   // ==================================================================
   // Word (.docx) 导入
   // ==================================================================
-  function findDocxEntries(u8, view){
-    const entries = [];
-    const n = u8.length;
-    let off = 0;
-    while(off + 4 <= n){
-      const sig = view.getUint32(off, true);
-      if(sig !== 0x04034b50) break;
-      const method = view.getUint16(off + 8, true);
-      let compSize = view.getUint32(off + 18, true);
-      const fnLen = view.getUint16(off + 26, true);
-      const extraLen = view.getUint16(off + 28, true);
-      const fnStart = off + 30;
-      let fname = "";
-      try { fname = new TextDecoder("utf-8").decode(u8.subarray(fnStart, fnStart + fnLen)); }
-      catch(e) { fname = ""; }
-      const dataStart = fnStart + fnLen + extraLen;
-      if(compSize === 0){
-        let next = -1;
-        for(let i = dataStart; i + 4 <= n; i++){
-          const v = (u8[i] | (u8[i+1]<<8) | (u8[i+2]<<16) | (u8[i+3]<<24)) >>> 0;
-          if(v === 0x04034b50 || v === 0x02014b50){ next = i; break; }
-        }
-        compSize = (next >= 0 ? next : n) - dataStart;
-      }
-      entries.push({ fname, method, compSize, dataStart });
-      off = dataStart + compSize;
-    }
-    return entries;
-  }
-
-  async function readDocxText(file){
-    if(typeof DecompressionStream === "undefined"){
-      throw new Error("当前浏览器不支持解压（DecompressionStream）。请使用较新版本的 Chrome / Edge / Safari。");
-    }
-    const buf = await file.arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    const view = new DataView(buf);
-
-    const entries = findDocxEntries(u8, view);
-    const docEntry = entries.find(e => e.fname === "word/document.xml")
-                 || entries.find(e => /word\/document\.xml$/i.test(e.fname));
-    if(!docEntry) throw new Error("未在文件中找到 word/document.xml（可能不是有效的 .docx）。");
-
-    async function readEntry(entry){
-      const compData = u8.subarray(entry.dataStart, entry.dataStart + entry.compSize);
-      if(entry.method === 0) return compData;
-      if(entry.method !== 8) throw new Error("不支持的压缩方式：" + entry.method);
-      const ds = new DecompressionStream("deflate-raw");
-      const writer = ds.writable.getWriter();
-      writer.write(compData);
-      writer.close();
-      return new Uint8Array(await new Response(ds.readable).arrayBuffer());
-    }
-
-    const xmlBytes = await readEntry(docEntry);
-    let xml = new TextDecoder("utf-8").decode(xmlBytes);
-
-    // Word 将脚注正文单独保存在 footnotes.xml，document.xml 中只留下编号引用。
-    // 在拆分正文/参考文献之前把脚注放回引用位置，脚注内的引用才能参与检测。
-    const footnotesEntry = entries.find(e => /(?:^|\/)word\/footnotes\.xml$/i.test(e.fname));
-    let footnoteCount = 0;
-    if(footnotesEntry){
-      const footnotesXml = new TextDecoder("utf-8").decode(await readEntry(footnotesEntry));
-      const footnotes = extractDocxFootnotes(footnotesXml);
-      const usedFootnotes = new Set();
-      xml = xml.replace(/<w:footnoteReference\b[^>]*\bw:id=["'](-?\d+)["'][^>]*\/?\s*>/gi, (tag, id) => {
-        const note = footnotes.get(id);
-        if(!note) return "";
-        usedFootnotes.add(id);
-        return `<w:t xml:space="preserve"> （脚注 ${escapeXmlText(id)}：${escapeXmlText(note)}） </w:t>`;
-      });
-      footnoteCount = usedFootnotes.size;
-    }
-
-    // 仅当文档确实含有分页符时，页码才有意义；否则全部视为无页码（避免误显示 “p.1”）
-    const hasPageInfo = /<w:lastRenderedPageBreak|<w:br[^>]*\bw:type=["']page["']/i.test(xml);
-    let paragraphs = docxXmlToText(xml);
-    if(!hasPageInfo) paragraphs = paragraphs.map(p => ({ ...p, page: null }));
-    return { paragraphs, hasPageInfo, footnoteCount };
-  }
-
-  function escapeXmlText(s){
-    return String(s ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
-
-  function extractDocxFootnotes(xml){
-    const notes = new Map();
-    const noteRe = /<w:footnote\b([^>]*)>([\s\S]*?)<\/w:footnote>/gi;
-    let match;
-    while((match = noteRe.exec(xml)) !== null){
-      const idMatch = match[1].match(/\bw:id=["'](-?\d+)["']/i);
-      if(!idMatch || Number(idMatch[1]) < 1) continue; // 跳过 Word 内置的分隔符脚注
-      const paragraphs = docxXmlToText(match[2]);
-      const text = paragraphs.map(p => p.text).filter(Boolean).join(" ").trim();
-      if(text) notes.set(idMatch[1], text);
-    }
-    return notes;
-  }
-
-  function decodeXmlEntities(s){
-    return (s ?? "")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&#x([0-9a-fA-F]+);/g, (m, h) => {
-        try { return String.fromCodePoint(parseInt(h, 16)); } catch(e){ return m; }
-      })
-      .replace(/&#(\d+);/g, (m, d) => {
-        try { return String.fromCodePoint(parseInt(d, 10)); } catch(e){ return m; }
-      })
-      .replace(/&amp;/g, "&");
-  }
-
-  function isDocxItalic(runInner){
-    const tags = runInner.match(/<w:i\b(?![Cs])([^>]*?)\/?>/gi);
-    if(!tags) return false;
-    for(const tag of tags){
-      const v = tag.match(/w:val="([^"]*)"/i);
-      if(v){
-        const val = v[1].toLowerCase();
-        if(val === "0" || val === "false" || val === "none") return false;
-        return true;
-      }
-      return true;
-    }
-    return false;
-  }
-
-  // 检测 Word 中的分页符：Word 保存时通常写入 <w:lastRenderedPageBreak/>，
-  // 显式分页为 <w:br w:type="page"/>。据此近似还原每条内容在原文件中的页码。
-  function pageBreakIndices(s){
-    const idxs = [];
-    let i;
-    i = -1; while((i = s.indexOf('<w:lastRenderedPageBreak', i + 1)) !== -1) idxs.push(i);
-    i = -1; while((i = s.indexOf('w:type="page"', i + 1)) !== -1) idxs.push(i);
-    i = -1; while((i = s.indexOf("w:type='page'", i + 1)) !== -1) idxs.push(i);
-    return idxs;
-  }
-
-  function docxXmlToText(xml){
-    // 先按原始 XML 分段，依据分页符估算每条内容在原 Word 文件中的页码
-    const rawParas = xml.split(/<\/w:p>/gi);
-    const pageOf = new Array(rawParas.length).fill(1);
-    let cur = 1;
-    for(let k = 0; k < rawParas.length; k++){
-      const rp = rawParas[k];
-      const idxs = pageBreakIndices(rp);
-      const tIdx = rp.indexOf('<w:t');
-      const beforeIdx = tIdx < 0 ? rp.length : tIdx;
-      let before = 0, after = 0;
-      for(const ix of idxs){ if(ix < beforeIdx) before++; else after++; }
-      cur += before;
-      pageOf[k] = cur;
-      cur += after;
-    }
-
-    let norm = xml
-      .replace(/<w:br\s*\/?>/gi, "\n")
-      .replace(/<w:tab\s*\/?>/gi, " ")
-      .replace(/<w:cr\s*\/?>/gi, "\n");
-
-    const paras = norm.split(/<\/w:p>/gi);
-    const out = [];
-    const runRe = /<w:r\b[^>]*>([\s\S]*?)<\/w:r>/gi;
-    const tRe = /<w:t[^>]*>([\s\S]*?)<\/w:t>/gi;
-
-    for(let pi = 0; pi < paras.length; pi++){
-      const p = paras[pi];
-      const segments = [];
-      let rm, hadRun = false;
-      runRe.lastIndex = 0;
-      while((rm = runRe.exec(p)) !== null){
-        hadRun = true;
-        const runInner = rm[1];
-        const italic = isDocxItalic(runInner);
-        tRe.lastIndex = 0;
-        let tm;
-        while((tm = tRe.exec(runInner)) !== null){
-          const txt = decodeXmlEntities(tm[1]);
-          if(txt) segments.push({ text: txt, italic });
-        }
-      }
-      if(!hadRun){
-        tRe.lastIndex = 0;
-        let tm;
-        while((tm = tRe.exec(p)) !== null){
-          const txt = decodeXmlEntities(tm[1]);
-          if(txt) segments.push({ text: txt, italic: false });
-        }
-      }
-      const text = segments.map(s => s.text).join("")
-        .replace(/\s+/g, " ").trim();
-      if(text.length > 0) out.push({ text, segments, page: pageOf[pi] });
-    }
-    return out.filter(x => x.text.length > 0);
-  }
-
   function refsHtmlFromParagraphs(refParas){
     let html = "";
     const paras = refParas || [];
@@ -469,7 +271,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     const headingIdx = bounds.headingIndex;
 
     if(headingIdx < 0){
-      const bodyParagraphs = paras.map(p => ({ text: p.text, page: p.page })).filter(p => p.text);
+      const bodyParagraphs = paras.map(p => ({ text: p.text, displayText: p.displayText, page: p.page })).filter(p => p.text);
       return {
         body: bodyParagraphs.map(p => p.text).join("\n\n"),
         bodyParagraphs,
@@ -480,7 +282,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
 
     const bodySourceParas = [...paras.slice(0, headingIdx), ...paras.slice(bounds.appendixIndex)];
     const bodyLines = bodySourceParas.map(p => p.text).filter(Boolean);
-    const bodyParagraphs = bodySourceParas.map(p => ({ text: p.text, page: p.page })).filter(p => p.text);
+    const bodyParagraphs = bodySourceParas.map(p => ({ text: p.text, displayText: p.displayText, page: p.page })).filter(p => p.text);
     let refParas = paras.slice(bounds.referenceStart, bounds.referenceEnd);
     const TRAILING_META_RE = /^\s*(word\s*count|words\s*:|page\s*count|pages\s*:|character\s*count|characters\s*:)/i;
     const refParasFiltered = refParas.filter(p => !TRAILING_META_RE.test(p.text || ""));
@@ -512,7 +314,40 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   let currentPdfBytes = null;
   let currentPdfLabels = null;
   let pdfViewer = null;
+  let currentDocxBytes = null;
+  let currentDocxKey = null;
+  let docxViewer = null;
   const commentSourceAnchors = new Map();
+
+  function ensureDocxViewer(){
+    let container = document.getElementById('docxSourceView');
+    if(!container){
+      container = document.createElement('div');
+      container.id = 'docxSourceView';
+      container.className = 'docx-source-view';
+      container.hidden = true;
+      document.querySelector('#docView .doc-view-bar')?.insertAdjacentElement('afterend', container);
+    }
+    if(!docxViewer && window.CitationDocxViewer?.create) docxViewer = window.CitationDocxViewer.create(container);
+    return { container, viewer: docxViewer };
+  }
+  function loadDocxSource(data, key){
+    if(!data || (key && key === currentDocxKey)) return;
+    currentDocxBytes = data;
+    currentDocxKey = key || data;
+    const { viewer } = ensureDocxViewer();
+    if(!viewer){ showImportMsg('err', 'Word 原文渲染模块未加载，请刷新页面。'); return; }
+    viewer.load(data).then(() => {
+      if(currentDocxBytes === data && currentSourceType === 'word' && !document.getElementById('docView').hidden) showPageStatus();
+    }).catch(error => {
+      if(currentDocxBytes !== data) return;
+      currentDocxBytes = null;
+      currentDocxKey = null;
+      viewer.clear();
+      showReview();
+      showImportMsg('err', 'Word 原文排版渲染失败：' + (error?.message || error));
+    });
+  }
 
   function ensurePdfViewer(){
     let container = document.getElementById('pdfSourceView');
@@ -564,7 +399,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     showImportMsg("", "正在读取并解析 Word 文档…");
     let fullText;
     try{
-      fullText = await readDocxText(file);
+      fullText = await window.CitationDocxImporter.parse(file);
     }catch(e){
       showImportMsg("err", "读取 Word 文档失败：" + (e && e.message ? e.message : e));
       try { localStorage.removeItem("cr_current_file"); } catch(_){}
@@ -578,7 +413,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     lastBodySourceBlocks = [];
     lastReferenceSourceBlocks = [];
     if(pdfViewer) pdfViewer.destroy();
-    lastBodyParagraphs = (fullText.hasPageInfo && bodyParagraphs && bodyParagraphs.length) ? bodyParagraphs : null;
+    lastBodyParagraphs = bodyParagraphs?.length ? bodyParagraphs : null;
+    loadDocxSource(file, file);
     const txtBodyEl = document.getElementById("txtBody");
     if(txtBodyEl){ txtBodyEl.value = body; }
     editor.innerHTML = sanitizeEditorHtml(refsHtmlFromParagraphs(refsParagraphs));
@@ -590,9 +426,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     updateFileNameBadge(file.name);
     try { localStorage.setItem("cr_current_file", file.name); } catch(e){}
     if(note){
-      const pageNote = fullText.hasPageInfo
-        ? ' 已保留正文与参考文献在原 Word 文件中的页码（依据分页符估算，审阅区以“第 N 页”分页标记并在底部状态栏显示当前页码，编辑区左侧对参考文献显示页码，仅供参考）。'
-        : '';
+      const pageNote = ' 审阅区已用 docxjs 渲染原文档版式；页面划分由浏览器估算，可能与 Word 不一致。';
       const footnoteNote = fullText.footnoteCount > 0
         ? ` 已读取 ${fullText.footnoteCount} 条脚注，并在对应正文位置参与检测。`
         : '';
@@ -601,6 +435,9 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   }
 
   async function applyPdfDocument(result, fileName, autoRun){
+    currentDocxBytes = null;
+    currentDocxKey = null;
+    docxViewer?.clear();
     currentSourceType = 'pdf';
     currentPdfBytes = result.pdfBytes || currentPdfBytes;
     currentPdfLabels = result.pageLabels || currentPdfLabels;
@@ -645,15 +482,28 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     document.getElementById('editArea').hidden = true;
     document.getElementById('docView').hidden = false;
     const pdfMode = currentSourceType === 'pdf' && !!currentPdfBytes;
+    const wordMode = currentSourceType === 'word' && !!currentDocxBytes;
+    if(checkMode === 'full'){
+      const title = document.querySelector('#docPage .doc-title');
+      const subtitle = document.querySelector('#docPage .doc-sub');
+      if(title) title.textContent = wordMode ? 'Word 原文审阅' : '点击右上角导入，或在下方粘贴';
+      if(subtitle) subtitle.textContent = wordMode
+        ? '左侧显示导入的 Word 版式；点击文中的标注或右侧批注可跳转。页面划分可能与 Word 不一致。'
+        : '左侧为导入的正文与参考文献列表；右侧以批注形式标注问题之处。点击高亮文字或批注卡片可互相跳转。';
+    }
+    document.querySelector('#docView')?.closest('.td-page')?.classList.toggle('word-source-active', wordMode);
     const pdfSource = document.getElementById('pdfSourceView');
     if(pdfSource) pdfSource.hidden = !pdfMode;
+    const docxSource = document.getElementById('docxSourceView');
+    if(docxSource) docxSource.hidden = !wordMode;
     const body = document.getElementById('docBody');
     const refsTitle = document.querySelector('#docView .doc-refs-title');
     const refs = document.getElementById('docRefs');
-    if(body) body.hidden = pdfMode || (checkMode === 'refs');
-    if(refsTitle) refsTitle.hidden = pdfMode;
-    if(refs) refs.hidden = pdfMode;
+    if(body) body.hidden = pdfMode || wordMode || (checkMode === 'refs');
+    if(refsTitle) refsTitle.hidden = pdfMode || wordMode;
+    if(refs) refs.hidden = pdfMode || wordMode;
     if(pdfMode){ hidePageStatus(); pdfViewer?.render(); }
+    else if(wordMode) showPageStatus();
     else if(lastBodyParagraphs) showPageStatus(); else hidePageStatus();
   }
   function showEdit(){
@@ -721,12 +571,18 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   // 底部状态栏：显示当前/总页码，随审阅区滚动更新
   function showPageStatus(){
     const sb = document.getElementById('pageStatus');
-    if(!sb || !lastBodyParagraphs){ if(sb) sb.hidden = true; return; }
-    const refPages = getReferenceBlocks().map(b => b.page || 0);
-    const pages = lastBodyParagraphs.map(p => p.page || 0).concat(refPages).filter(p => p > 0);
-    const tot = pages.length ? Math.max.apply(null, pages) : 1;
-    document.getElementById('totPage').textContent = tot;
-    sb.hidden = false;
+    if(!sb || document.getElementById('docView').hidden){ if(sb) sb.hidden = true; return; }
+    const wordMode = currentSourceType === 'word' && !!currentDocxBytes;
+    const renderedPages = wordMode ? document.querySelectorAll('#docxSourceView section.docx') : [];
+    const sourcePages = (lastBodyParagraphs || []).map(p => Number(p.page) || 0)
+      .concat(getReferenceBlocks().map(b => Number(b.page) || 0)).filter(p => p > 0);
+    const hasEstimate = sourcePages.length > 0;
+    document.getElementById('renderedPageStatus').hidden = !renderedPages.length;
+    document.getElementById('estimatedPageStatus').hidden = !hasEstimate;
+    document.getElementById('estimatedPageNote').hidden = !hasEstimate;
+    if(renderedPages.length) document.getElementById('totRenderedPage').textContent = String(renderedPages.length);
+    if(hasEstimate) document.getElementById('totPage').textContent = String(Math.max(...sourcePages));
+    sb.hidden = !renderedPages.length && !hasEstimate;
     updatePageStatus();
   }
   function hidePageStatus(){
@@ -738,13 +594,31 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     if(!sb || sb.hidden) return;
     const scroller = document.querySelector('.td-doc-scroll');
     if(!scroller) return;
-    const line = scroller.getBoundingClientRect().top + 60; // 判定当前页的基准线
-    let cur = 1;
-    document.querySelectorAll('#docView [data-page]').forEach(el => {
-      if(el.getBoundingClientRect().top <= line) cur = parseInt(el.dataset.page, 10) || cur;
+    const line = Math.max(0, scroller.getBoundingClientRect().top) + 60;
+    const wordMode = currentSourceType === 'word' && !!currentDocxBytes;
+    if(wordMode){
+      const sheets = [...document.querySelectorAll('#docxSourceView section.docx')];
+      let currentSheet = 1;
+      sheets.forEach((sheet, index) => { if(sheet.getBoundingClientRect().top <= line) currentSheet = index + 1; });
+      document.getElementById('curRenderedPage').textContent = String(currentSheet);
+      const page = sheets[currentSheet - 1];
+      const onPage = page ? [...page.querySelectorAll('[data-source-page]')] : [];
+      const markers = [...document.querySelectorAll('#docxSourceView [data-source-page]')];
+      let estimated = markers.length ? Number(markers[0].dataset.sourcePage) : 1;
+      markers.forEach(marker => {
+        if(marker.getBoundingClientRect().top <= line) estimated = Number(marker.dataset.sourcePage) || estimated;
+      });
+      if(onPage.length && !onPage.some(marker => marker.getBoundingClientRect().top <= line)){
+        estimated = Number(onPage[0].dataset.sourcePage) || estimated;
+      }
+      document.getElementById('curPage').textContent = String(estimated);
+      return;
+    }
+    let estimated = 1;
+    document.querySelectorAll('#docBody [data-page], #docRefs [data-page]').forEach(el => {
+      if(el.getClientRects().length && el.getBoundingClientRect().top <= line) estimated = Number(el.dataset.page) || estimated;
     });
-    const curEl = document.getElementById('curPage');
-    if(curEl) curEl.textContent = cur;
+    document.getElementById('curPage').textContent = String(estimated);
   }
 
   function flashEl(el, cls){
@@ -867,7 +741,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       card.innerHTML = `
         <div class="cm-head">
           <span class="cm-tag tag-${c.color}">${c.tag}</span>
-          ${c.page ? `<span class="cm-source-page">原文第 ${c.page} 页</span>` : ''}
+          ${c.page ? `<span class="cm-source-page">${currentSourceType === 'word' ? '推测第' : '原文第'} ${c.page} 页</span>` : ''}
           ${c.count ? `<span class="cm-count2">出现 ${c.count} 次</span>` : ''}
           ${resolved ? `<span class="cm-badge-resolved">✓ 已解决</span>` : ''}
           <button type="button" class="cm-copy" data-cmid="${c.cmid}" title="复制该卡片内容">⧉</button>
@@ -1173,11 +1047,21 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     formatComments.forEach(c => comments.push(c));
 
     renderComments(comments.filter(c => isTypeEnabled(c.color)), {});
+    if(currentSourceType === 'word' && currentDocxBytes){
+      ensureDocxViewer().viewer?.annotate({
+        bodyText: bodyNorm,
+        bodyParagraphs: lastBodyParagraphs || [],
+        bodyRanges,
+        referenceBlocks: refBlocks,
+        referenceMarks: Array.from(docRefsEl.children).map(li => ({
+          id: li.dataset.cmid,
+          ids: li.dataset.cmids || '',
+          classes: ['hl-unused', 'hl-format', 'hl-resolved'].filter(cls => li.classList.contains(cls))
+        }))
+      });
+    }
 
     showReview();
-    if(currentSourceType === 'pdf') hidePageStatus();
-    else if(lastBodyParagraphs) showPageStatus();
-    else hidePageStatus();
   }
 
   // ==================================================================
@@ -1517,7 +1401,16 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   // 审阅区滚动时更新底部状态栏的当前页码
   const _docScroll = document.querySelector('.td-doc-scroll');
   if(_docScroll) _docScroll.addEventListener('scroll', updatePageStatus, { passive: true });
+  window.addEventListener('scroll', updatePageStatus, { passive: true });
   window.addEventListener('resize', updatePageStatus);
+  [document.getElementById('txtBody'), editor].filter(Boolean).forEach(input => input.addEventListener('input', () => {
+    if(currentSourceType !== 'word' || !currentDocxBytes) return;
+    currentSourceType = 'paste';
+    currentDocxBytes = null;
+    currentDocxKey = null;
+    lastBodyParagraphs = null;
+    docxViewer?.clear();
+  }));
 
   // 统一工作区入口：接收首页已解析的正文、富文本参考文献和原文件定位信息。
   window.CitationReviewerPage = Object.freeze({
@@ -1532,6 +1425,12 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
         return;
       }
       currentSourceType = d.sourceType || 'paste';
+      if(currentSourceType === 'word' && d.docxBytes) loadDocxSource(d.docxBytes, d.docxToken || d.docxBytes);
+      else if(currentSourceType !== 'word'){
+        currentDocxBytes = null;
+        currentDocxKey = null;
+        docxViewer?.clear();
+      }
       currentPdfBytes = null;
       currentPdfLabels = null;
       lastBodySourceBlocks = [];
@@ -1539,8 +1438,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       if(pdfViewer) pdfViewer.destroy();
       const body = document.getElementById('txtBody');
       if(body) body.value = d.bodyText || '';
-      lastBodyParagraphs = d.hasPageInfo && Array.isArray(d.bodyBlocks)
-        ? d.bodyBlocks.filter(x => x && x.text).map(x => ({ text:x.text, page:Number(x.page)||null }))
+      lastBodyParagraphs = Array.isArray(d.bodyBlocks)
+        ? d.bodyBlocks.filter(x => x && x.text).map(x => ({ text:x.text, displayText:x.displayText, page:Number(x.page)||null }))
         : null;
       const blocks = Array.isArray(d.referenceBlocks) ? d.referenceBlocks : [];
       if(blocks.length){

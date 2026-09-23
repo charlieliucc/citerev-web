@@ -83,37 +83,19 @@
     return candidates[0]?assess(original,candidates[0],sources):{original,status:"unmatched",score:0,checks:[],sources:["Crossref","OpenAlex"],error:"未在当前公开索引中找到可信记录；这不等于文献不存在"};
   }
   async function verifyAll(refs,onProgress){const out=[];for(let i=0;i<refs.length;i++){onProgress?.(i,refs.length);out.push(await verifyOne(refs[i]));}onProgress?.(refs.length,refs.length);return out;}
-  function zipEntry(bytes,view,name){
-    let eocd=-1;for(let i=bytes.length-22;i>=0;i--)if(view.getUint32(i,true)===0x06054b50){eocd=i;break;}if(eocd<0)throw new Error("不是有效的 .docx 文件");
-    let p=view.getUint32(eocd+16,true);const count=view.getUint16(eocd+10,true);for(let n=0;n<count;n++){if(view.getUint32(p,true)!==0x02014b50)break;const nl=view.getUint16(p+28,true),el=view.getUint16(p+30,true),cl=view.getUint16(p+32,true),entryName=new TextDecoder().decode(bytes.subarray(p+46,p+46+nl));if(entryName===name){const off=view.getUint32(p+42,true),method=view.getUint16(p+10,true),size=view.getUint32(p+20,true),localNl=view.getUint16(off+26,true),localEl=view.getUint16(off+28,true),start=off+30+localNl+localEl;return{method,data:bytes.subarray(start,start+size)};}p+=46+nl+el+cl;}return null;
-  }
-  async function inflateEntry(entry){if(!entry)return"";let data;if(entry.method===0)data=entry.data;else{if(typeof DecompressionStream==="undefined")throw new Error("浏览器不支持 Word 解压");const ds=new DecompressionStream("deflate-raw");data=new Uint8Array(await new Response(new Response(entry.data).body.pipeThrough(ds)).arrayBuffer());}return new TextDecoder().decode(data);}
-  function runStyle(inner,tag){const tags=inner.match(new RegExp(`<w:${tag}\\b([^>]*?)\\/?>`,"gi"));if(!tags)return false;return tags.some(x=>{const m=x.match(/w:val=["']([^"']*)["']/i);return !m||!(/^(?:0|false|none|off)$/i.test(m[1]));});}
-  function styledParagraph(segments,page){
-    const chars=[];segments.forEach(s=>{for(const c of s.text)chars.push({c,italic:s.italic,bold:s.bold});});
-    const compact=[];for(const x of chars){if(/\s/.test(x.c)){if(compact.length&&!/\s/.test(compact[compact.length-1].c))compact.push({...x,c:" "});}else compact.push(x);}while(compact[0]?.c===" ")compact.shift();while(compact[compact.length-1]?.c===" ")compact.pop();
-    const text=compact.map(x=>x.c).join(""),italics=[],bolds=[];let html="",i=0;
-    while(i<compact.length){const style={italic:compact[i].italic,bold:compact[i].bold};let j=i+1;while(j<compact.length&&compact[j].italic===style.italic&&compact[j].bold===style.bold)j++;let chunk=esc(compact.slice(i,j).map(x=>x.c).join(""));if(style.bold)chunk=`<strong>${chunk}</strong>`;if(style.italic)chunk=`<em>${chunk}</em>`;html+=chunk;if(style.italic)italics.push([i,j]);if(style.bold)bolds.push([i,j]);i=j;}
-    return{text,rawText:text,html,italics,bolds,page};
-  }
   function combineParagraphs(group){
     let text="",html="";const italics=[],bolds=[];for(const p of group){const gap=text?1:0,base=text.length+gap;if(gap){text+=" ";html+=" ";}text+=p.text;html+=p.html;(p.italics||[]).forEach(([s,e])=>italics.push([s+base,e+base]));(p.bolds||[]).forEach(([s,e])=>bolds.push([s+base,e+base]));}return{text,rawText:text,html,italics,bolds,page:group[0]?.page||null};
   }
-  function documentParagraphs(xml,footnotePages){
-    const paras=[];let page=1;
-    for(const part of xml.split(/<\/w:p>/i)){const segments=[],firstText=part.search(/<w:t\b/i);let before=0,total=0;for(const marker of part.matchAll(/<w:lastRenderedPageBreak\s*\/?\s*>|<w:br\b[^>]*w:type=["']page["'][^>]*\/?\s*>|<w:footnoteReference\b[^>]*w:id=["'](-?\d+)["'][^>]*\/?\s*>/gi)){if(marker[1]!=null)footnotePages?.set(marker[1],page+before);else{total++;if(firstText<0||marker.index<firstText)before++;}}const startPage=page+before;page+=total;for(const run of part.matchAll(/<w:r\b[^>]*>([\s\S]*?)<\/w:r>/gi)){const inner=run[1],italic=runStyle(inner,"i"),bold=runStyle(inner,"b");for(const t of inner.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi))segments.push({text:decode(t[1]),italic,bold});}if(!segments.length)for(const t of part.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi))segments.push({text:decode(t[1]),italic:false,bold:false});const para=styledParagraph(segments,startPage);if(para.text)paras.push(para);}
-    return paras;
-  }
-  function footnoteParagraphs(xml,footnotePages){
-    const out=[];for(const note of xml.matchAll(/<w:footnote\b[^>]*w:id=["'](-?\d+)["'][^>]*>([\s\S]*?)<\/w:footnote>/gi)){if(Number(note[1])<1)continue;const text=[...note[2].matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gi)].map(m=>decode(m[1])).join(" ").replace(/\s+/g," ").trim();if(text)out.push({text:`[脚注 ${note[1]}] ${text}`,rawText:text,html:esc(text),italics:[],bolds:[],page:footnotePages.get(note[1])||null});}return out;
-  }
   async function parseDocx(file){
-    const buffer=await file.arrayBuffer(),bytes=new Uint8Array(buffer),view=new DataView(buffer),documentEntry=zipEntry(bytes,view,"word/document.xml");if(!documentEntry)throw new Error("未找到 Word 正文");
-    const footnotePages=new Map(),xml=await inflateEntry(documentEntry),hasPageInfo=/<w:lastRenderedPageBreak\b|<w:br\b[^>]*w:type=["']page["']/i.test(xml),paras=documentParagraphs(xml,footnotePages),footnoteXml=await inflateEntry(zipEntry(bytes,view,"word/footnotes.xml")),footnotes=footnoteParagraphs(footnoteXml,footnotePages),full=paras.map(x=>x.text).join("\n"),sections=global.CitationReferenceSplitter.findDocumentSectionBounds(paras,p=>p&&p.text);
-    if(!hasPageInfo)paras.forEach(p=>{p.page=null;});
-    if(!sections.found)return{body:"",references:full,text:full,bodyBlocks:[],referenceBlocks:global.CitationReferenceSplitter.groupReferenceLines(paras).map(combineParagraphs),hasPageInfo};
-    const bodyParas=[...paras.slice(0,sections.headingIndex),...paras.slice(sections.appendixIndex)],referenceParas=paras.slice(sections.referenceStart,sections.referenceEnd),bodyBlocks=[...bodyParas,...footnotes],referenceBlocks=global.CitationReferenceSplitter.groupReferenceLines(referenceParas).map(combineParagraphs),bodyText=bodyBlocks.map(x=>x.text).join("\n"),referenceText=referenceBlocks.map(x=>x.text).join("\n\n");
-    return{body:bodyText,references:referenceText,bodyBlocks,referenceBlocks,text:full,footnoteCount:footnotes.length,hasPageInfo};
+    const imported=await global.CitationDocxImporter.parse(file);
+    const paras=imported.paragraphs;
+    const full=paras.map(x=>x.text).join("\n");
+    const sections=global.CitationReferenceSplitter.findDocumentSectionBounds(paras,p=>p&&p.text);
+    if(!sections.found)return{body:"",references:full,text:full,bodyBlocks:[],referenceBlocks:global.CitationReferenceSplitter.groupReferenceLines(paras).map(combineParagraphs),footnoteCount:imported.footnoteCount,hasPageInfo:imported.hasPageInfo};
+    const bodyParas=[...paras.slice(0,sections.headingIndex),...paras.slice(sections.appendixIndex)];
+    const referenceParas=paras.slice(sections.referenceStart,sections.referenceEnd);
+    const referenceBlocks=global.CitationReferenceSplitter.groupReferenceLines(referenceParas).map(combineParagraphs);
+    return{body:bodyParas.map(x=>x.text).join("\n"),references:referenceBlocks.map(x=>x.text).join("\n\n"),bodyBlocks:bodyParas,referenceBlocks,text:full,footnoteCount:imported.footnoteCount,hasPageInfo:imported.hasPageInfo};
   }
   global.CitationReportEngine=Object.freeze({localAnalysis,distributionAnalysis,distribution,verifyAll,parseDocx});
 })(window);

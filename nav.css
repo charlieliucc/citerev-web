@@ -31,6 +31,18 @@
   background: var(--td-blue-weak, #eff6ff); padding: 4px 6px; border-radius: 5px; letter-spacing: .04em;
 }
 
+.cr-version{
+  display:block;
+  margin:16px auto 0;
+  color:var(--td-muted, #646a73);
+  font-size:12px;
+  line-height:1.5;
+  text-align:center;
+}
+.workspace-start .cr-version{margin:0;}
+footer .cr-version{margin:0;}
+@media print{.cr-version{display:none;}}
+
 /* 主导航 */
 .cr-mainnav{ display: flex; align-items: center; justify-content: center; gap: 3px; min-width: 0; }
 .cr-mainnav a{

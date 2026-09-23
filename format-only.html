@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; connect-src https://api.crossref.org https://api.openalex.org; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'self'; base-uri 'none'; form-action 'none'" />
   <meta name="referrer" content="no-referrer" />
   <title>引用审查网页版 · 格式检查 CiteRev Web</title>
-  <link rel="stylesheet" href="common.css?v=20260911-pdf1">
+  <link rel="stylesheet" href="common.css?v=20260923-page2">
   <link rel="stylesheet" href="nav.css">
 </head>
 <body>
@@ -65,9 +65,9 @@
         </div>
       </div>
       <div id="pageStatus" class="page-status" hidden>
-        <span>原文件页码</span>
-        第 <b id="curPage">1</b> 页 / 共 <b id="totPage">1</b> 页
-        <span class="ps-note">（依据 Word 分页符估算，仅供参考）</span>
+        <span id="renderedPageStatus" hidden>渲染页：第 <b id="curRenderedPage">1</b> 页 / 共 <b id="totRenderedPage">1</b> 页</span>
+        <span id="estimatedPageStatus" hidden>原文件推测：第 <b id="curPage">1</b> 页 / 共 <b id="totPage">1</b> 页</span>
+        <span id="estimatedPageNote" class="ps-note" hidden>（依据 DOCX 分页记录，仅供参考）</span>
       </div>
     </div>
 
@@ -85,7 +85,7 @@
   <footer class="site-footer">
     <div class="sf-copy">
       <span>© 2026 Charlie Liu</span>
-      <span class="sf-ver">版本 v1.0-20260816 · Web版</span>
+      <span class="sf-ver">版本 1.1(20260923) · Web版</span>
       <span>引用审查基于规则设计，可能无法识别全部错误，请注意核对。</span>
     </div>
     <a class="sf-site" href="https://charlieliucc.github.io/citerev/" target="_blank" rel="noopener">访问官网 ↗</a>
@@ -110,11 +110,15 @@
     <span>批注</span><span class="badge" id="mobileCmCount">0</span>
   </button>
 
+  <script src="./vendor/docxjs/jszip.min.js"></script>
+  <script src="./vendor/docxjs/docx-preview.min.js"></script>
+  <script src="./docx-import.js?v=20260922-docxjs1"></script>
+  <script src="./docx-viewer.js?v=20260923-page2"></script>
   <script src="./reference-splitter.js?v=20260916-appendix1"></script>
   <script src="./pdf-import.js?v=20260916-pagejump1"></script>
   <script src="./citation-core.js?v=20260916-citation1"></script>
   <script src="./apa7-citation-rules.js?v=20260916-citation1"></script>
-  <script src="./app.js?v=20260916-appendix1"></script>
+  <script src="./app.js?v=20260923-page2"></script>
 
 <!-- 关于（与 macOS 版本关于页内容一致） -->
 <div class="about-overlay" id="aboutOverlay">
@@ -129,7 +133,7 @@
         <img class="logo" src="logo.png" alt="logo" />
         <div class="name">CiteRev Web</div>
         <div class="sub">引用与参考文献一致性校对工具</div>
-        <div class="ver">v1.0-20260816 · Web版</div>
+        <div class="ver">1.1(20260923) · Web版</div>
       </div>
 
       <div class="about-section">
