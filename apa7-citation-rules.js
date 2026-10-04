@@ -36,8 +36,8 @@
     const out = [];
     for(const pr of parsedRefs){
       for(const a of pr.authors){
-        const s = normalizeSpace(a.surname).toLowerCase();
-        if(s === (surname || "").toLowerCase()){
+        const s = normalizeAuthorKey(a.surname);
+        if(s === normalizeAuthorKey(surname)){
           if(!initial || !a.initial || a.initial.toLowerCase() === initial.toLowerCase()){ out.push(pr); break; }
         }
       }
@@ -64,6 +64,7 @@
     const comments = [];
     let idx = 0;
     for(const c of rawCites){
+      if(!c.year) continue;
       const authors = c.authors || [];
       const year = c.year;
       const keys = buildKeys(authors, c.etal, year);
@@ -121,6 +122,14 @@
     for(const c of rawCites){
       const authors = c.authors || [];
       const chunk = c.raw || "";
+      if(c.retrievalYear && !c.year){
+        comments.push({
+          id:'is'+(idx++), color:'style', tag:'检索年份待核对',
+          quote:chunk, count:1, start:c.start, end:c.end,
+          desc:`该括号标注的是检索年份 ${escapeHtml(c.retrievalYear)}，未提供可用于参考文献匹配的出版年份。请核对来源的出版年份并规范文内引用；仅凭检索年份无法判定对应参考文献是否缺失。`
+        });
+        continue;
+      }
 
       if(isSecondarySource(chunk)){
         comments.push({
@@ -236,6 +245,7 @@
   }
 
   function detectInTextStyleWarnings(rawCites, parsedRefs){
+    rawCites = rawCites.filter(c=>c.year);
     const comments = [];
     let idx = 0;
     for(const c of rawCites){
@@ -420,6 +430,12 @@
 // ==================================================================
   // APA 7 格式检查
   // ==================================================================
+  // 即使条目缺少页码/文章编号，“期刊名, 卷号. DOI”仍有可检查的
+  // 期刊名和卷号；不能因出版字段不完整就按图书处理并跳过斜体检查。
+  function matchJournalVolumeOnly(text){
+    return String(text).match(/\)\.\s+(.+?)[.!?]\.?\s+([^.!?]+?),\s+(\d{1,4})(\s*\(\s*\d+\s*\))?(?:\.|$)(?=\s*(?:https?:\/\/|doi\s*:|10\.|$))/i);
+  }
+
   function classifyReference(text, italics){
     const t = text;
     const tPages = stripUrlsForPages(t);
@@ -462,6 +478,7 @@
     if(isDissertation) return '学位论文（推测）';
     if(isChapter) return '书籍章节（推测）';
     if(hasItalicTrailingSource) return '期刊文章（推测，出版信息不完整）';
+    if(matchJournalVolumeOnly(t)) return '期刊文章（推测，出版信息不完整）';
     if(isBook) return '图书/报告（推测）';
     if(hasDoi) return '期刊文章（推测）';
     if(hasVolumeIssue && (hasPages || hasUrl)) return '期刊文章（推测）';
@@ -744,7 +761,7 @@
     const t = String(text);
     let volMatch = t.match(/,\s*\d{1,4}\s*\(\s*\d+\s*\),\s*(?:[\d–-]+\s*\d|[A-Za-z]?\d+)/);
     if(!volMatch) volMatch = t.match(/,\s*\d{1,4}\s*,\s*(?:[\d–-]+\s*\d|[A-Za-z]?\d{4,})\b/);
-    if(!volMatch) return "";
+    if(!volMatch) return matchJournalVolumeOnly(t)?.[2] || "";
     const beforeVol = t.slice(0, volMatch.index);
     const m = beforeVol.match(/([.!?])[^.!?]*$/);
     let journal = m ? beforeVol.slice(m.index + 1) : beforeVol;
@@ -752,17 +769,42 @@
     return journal;
   }
 
+  function checkJournalTitleCase(title){
+    // APA title case keeps short articles, conjunctions and prepositions lowercase.
+    // Mixed-case names such as eLife and mBio retain their published spelling.
+    const minor = new Set('a an and as at but by en for if in nor of on or per the to up via vs yet so off out'.split(' '));
+    const words = [...title.matchAll(/[A-Za-z]+(?:['’][A-Za-z]+)*/g)];
+    const lowercase = words.filter((word, index) => {
+      const value = word[0];
+      const afterColon = index > 0 && /[:：]\s*$/.test(title.slice(words[index - 1].index + words[index - 1][0].length, word.index));
+      return /^[a-z]/.test(value) && !/[A-Z]/.test(value) &&
+        (index === 0 || afterColon || !minor.has(value.toLowerCase()));
+    }).map(word => word[0]);
+    return lowercase.length
+      ? [issue('warn', `期刊名应使用标题式大小写（Title Case）：首词及主要词首字母大写，短冠词、连词和介词通常小写。请检查「${[...new Set(lowercase)].join('、')}」。`, '大小写：期刊名')]
+      : [];
+  }
+
+  function hasItalicText(line, start, end){
+    // A single italic word must not make a partly roman journal title pass.
+    for(let index = start; index < end; index++){
+      if(/[\p{L}\p{N}]/u.test(line.text[index]) && !overlapsItalic(line.italics, index, index + 1)) return false;
+    }
+    return true;
+  }
+
   function checkJournalHeuristics(line, gi){
     const issues = [];
     const t = line.text;
-    const rePages = /\)\.\s+(.+?)\.\s+(.+?),\s+(\d+)(\s*\(\s*\d+\s*\))?,\s+([^\.]+?)\./;
-    const reELocator = /\)\.\s+(.+?)\.\s+(.+?),\s+(\d{1,4}),\s*(e\d+|\d{4,}|[A-Za-z]\d{4,})\./;
-    const reAdvance = /\)\.\s+(.+?)\.\s+(.+?)\.\s+Advance online publication\./i;
+    const rePages = /\)\.\s+(.+?)[.!?]\.?\s+(.+?),\s+(\d+)(\s*\(\s*\d+\s*\))?,\s+([^\.]+?)(?:\.|$)/;
+    const reELocator = /\)\.\s+(.+?)[.!?]\.?\s+(.+?),\s+(\d{1,4}),\s*(e\d+|\d{4,}|[A-Za-z]\d{4,})(?:\.|$)/;
+    const reAdvance = /\)\.\s+(.+?)[.!?]\.?\s+(.+?)\.\s+Advance online publication(?:\.|$)/i;
 
     const m1 = t.match(rePages);
     const m2 = t.match(reELocator);
     const m3 = t.match(reAdvance);
-    if(!m1 && !m2 && !m3){
+    const m4 = matchJournalVolumeOnly(t);
+    if(!m1 && !m2 && !m3 && !m4){
       const tCore = t.replace(/\s*(https?:\/\/\S+|10\.\d{4,9}\/\S+|doi:\S+)\s*/gi, '');
       const reTitleJournal = /\)\.\s+(.+?)\.\s+(.+?)\.\s*(?:https?:\/\/|10\.|$)/;
       if(reTitleJournal.test(tCore)){
@@ -774,15 +816,15 @@
       return issues;
     }
 
-    const journalTitle = m1 ? m1[2] : (m2 ? m2[2] : m3[2]);
-    const volume = m1 ? m1[3] : (m2 ? m2[3] : '');
-    const issuePart = m1 ? (m1[4] || '') : '';
+    const journalTitle = (m1 || m2 || m3 || m4)[2];
+    const volume = (m1 || m2 || m4)?.[3] || '';
+    const issuePart = (m1 || m4)?.[4] || '';
 
     // 从本条期刊格式正则的匹配片段中定位期刊名。不能直接在整条文本上
     // indexOf：文章标题可能包含与期刊名相同的文字（例如
     // "Posthumanist Applied Linguistics. Applied Linguistics, ..."），此时会
     // 错把文章标题中的文字当成期刊名，进而同时误报斜体和逗号。
-    const journalMatch = m1 || m2 || m3;
+    const journalMatch = m1 || m2 || m3 || m4;
     const journalOffset = (journalMatch && journalTitle)
       ? journalMatch[0].lastIndexOf(journalTitle)
       : -1;
@@ -791,11 +833,13 @@
       : -1;
     const volStart = (journalStart >= 0 && volume) ? t.indexOf(volume, journalStart + journalTitle.length) : -1;
 
+    issues.push(...checkJournalTitleCase(journalTitle));
+
     if(gi){
-      if(journalStart >= 0 && !overlapsItalic(line.italics, journalStart, journalStart + journalTitle.length)){
+      if(journalStart >= 0 && !hasItalicText(line, journalStart, journalStart + journalTitle.length)){
         issues.push(issue('bad', '期刊名在 APA 7 中应为斜体。', '斜体：期刊名'));
       }
-      if(volStart >= 0 && volume && !overlapsItalic(line.italics, volStart, volStart + volume.length)){
+      if(volStart >= 0 && volume && !hasItalicText(line, volStart, volStart + volume.length)){
         issues.push(issue('bad', '卷号（volume）在 APA 7 中应为斜体。', '斜体：卷号'));
       }
       if(issuePart){
@@ -984,6 +1028,8 @@
   function lintReference(line, gi){
     const issues = [];
     if(!line.text) return { type: '空行', issues };
+    // Known PDF font styles remain usable even when all text is roman.
+    gi = gi || line.styleInfoAvailable === true;
     const type = classifyReference(line.text, line.italics);
     issues.push(...checkGeneral(line));
     issues.push(...checkReferenceAuthorFormat(line));

@@ -21,7 +21,7 @@
     const blocks=richBlocks&&richBlocks.length===referenceTexts.length?richBlocks:referenceTexts.map(block);
     const parsed=blocks.map((b,i)=>{const p=parseReferenceEntry(b.text);if(p){p._idx=i;p.page=b.page||null;p.italics=b.italics||[];}return p;}).filter(Boolean);
     const refsByKey=new Map();parsed.forEach(p=>p.keys.forEach(k=>{if(!refsByKey.has(k))refsByKey.set(k,p);}));
-    const citations=extractCitationsFromBody(body||"");
+    const citations=extractCitationsFromBody(body||"",parsed);
     const citeItems=citations.map(c=>({...c,keys:buildKeys(c.authors,c.etal,c.year)})).filter(c=>c.keys.length);
     const fullIssues=[];
     const seen=new Set();
@@ -39,11 +39,11 @@
   function distributionAnalysis(body,referenceTexts,richBlocks){
     const blocks=richBlocks&&richBlocks.length===referenceTexts.length?richBlocks:referenceTexts.map(block);
     const parsed=blocks.map((b,i)=>{const p=parseReferenceEntry(b.text);if(p){p._idx=i;p.page=b.page||null;}return p;}).filter(Boolean);
-    const citations=extractCitationsFromBody(body||"").map(c=>({...c,keys:buildKeys(c.authors,c.etal,c.year)})).filter(c=>c.keys.length);
+    const citations=extractCitationsFromBody(body||"",parsed).map(c=>({...c,keys:buildKeys(c.authors,c.etal,c.year)})).filter(c=>c.keys.length);
     return{blocks,parsed,citations,fullIssues:[],formatIssues:[]};
   }
   function distribution(analysis){
-    const citeMap=new Map();analysis.citations.forEach(c=>{const names=c.authors.map(a=>normalizeSpace(a.surname)).filter(Boolean);if(!names.length)return;const key=names.join("&").toLowerCase()+"|"+c.year;const label=names.length>2?`${names[0]} et al. (${c.year})`:names.join(" & ")+` (${c.year})`;const x=citeMap.get(key)||{label,count:0};x.count++;citeMap.set(key,x);});
+    const citeMap=new Map();analysis.citations.forEach(c=>{if(!c.year)return;const names=c.authors.map(a=>normalizeSpace(a.surname)).filter(Boolean);if(!names.length)return;const key=names.join("&").toLowerCase()+"|"+c.year;const label=names.length>2?`${names[0]} et al. (${c.year})`:names.join(" & ")+` (${c.year})`;const x=citeMap.get(key)||{label,count:0};x.count++;citeMap.set(key,x);});
     const years=analysis.parsed.map(p=>Number((p.year||"").match(/\d{4}/)?.[0])).filter(Boolean);
     const yearMap=new Map();years.forEach(y=>{const label=String(y);yearMap.set(label,(yearMap.get(label)||0)+1);});
     const journals=new Map();analysis.blocks.forEach(b=>{const m=b.text.match(/\)\.\s+.+?\.\s+(.+?),\s*\d+(?:\(\d+\))?,/);if(m){const name=m[1].trim(),key=norm(name);const x=journals.get(key)||{label:name,count:0};x.count++;journals.set(key,x);}});

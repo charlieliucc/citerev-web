@@ -2,6 +2,28 @@
   "use strict";
 
   const MIN_REFERENCE_LENGTH=8;
+  const DATE_RE=/\((?:19|20)\d{2}[a-z]?\)/i;
+  const SURNAME="(?:\\p{Lu}[\\p{L}\\p{M}'’\\p{Pd}]*|de|van|von|der|den|dem|ter|ten|la|du|des|del|da|dos|y)(?:\\s+(?:\\p{Lu}[\\p{L}\\p{M}'’\\p{Pd}]*|de|van|von|der|den|dem|ter|ten|la|du|des|del|da|dos|y)){0,5}";
+  const INITIAL="\\p{Lu}\\p{M}*\\.";
+  // S.-K. 等带连接号的名字首字母仍属于同一作者。
+  const AUTHOR=SURNAME+"\\s*,\\s*"+INITIAL+"(?:\\s*(?:\\p{Pd}\\s*)?"+INITIAL+"){0,5}\\s*";
+  const AUTHOR_START_RE=new RegExp("^"+AUTHOR,"u");
+  // 长作者名单中的省略号也属于作者分隔符，不能让最后一位作者
+  // 单独产生起点，或让跨行年份导致整条文献并入上一条。
+  const AUTHOR_SEPARATOR="(?:,\\s*(?:&\\s*|(?:\\.\\s*){3}|…\\s*)?|&\\s*|and\\s*|(?:\\.\\s*){3}|…\\s*)";
+  const AUTHOR_DATE_RE=new RegExp("(^|\\s)("+AUTHOR+"(?:"+AUTHOR_SEPARATOR+AUTHOR+")*\\s*\\((?:19|20)\\d{2}[a-z]?\\))","gu");
+
+  // 完整作者名单只产生一个起点，避免把 Barnett 等合作者拆成新文献。
+  function referenceStartOffsets(text=""){
+    const source=String(text),offsets=[];
+    AUTHOR_DATE_RE.lastIndex=0;
+    let match;
+    while((match=AUTHOR_DATE_RE.exec(source)))offsets.push(match.index+match[1].length);
+    return offsets;
+  }
+  // 卷号可能单独换行成“49. https://doi.org/...”，它是上一条文献的
+  // 延续，不能据此把整份作者—年份列表切换成编号列表。
+  const NUMBERED_REFERENCE_RE=/^[ \t]*\d{1,3}[.)]\s+(?!https?:\/\/|doi\b|10\.\d{4,9}\/)(?=\S)/i;
   const REFERENCE_HEADING_RE=/^[ \t#*0-9.)\-–—]*(?:references?|reference\s+list|works\s+cited|works\s+consulted|sources?|bibliograph(?:y|ies)|literature\s+cited|参考文献|参考资料)[ \t.:：·•0-9\-–—]*$/i;
 
   function normalizeBreaks(text=""){
@@ -13,10 +35,13 @@
   function isLikelyReferenceStart(line=""){
     const text=String(line).trim();
     if(!text)return false;
-    if(/^(?:\[\d+\]|\d{1,3}[.)])\s+/.test(text))return true;
-    const hasYear=/(?:^|[\s(,.;])(?:19|20)\d{2}[a-z]?(?:[\s),.;:]|$)/i.test(text);
+    if(/^\[\d+\]\s+/.test(text)||NUMBERED_REFERENCE_RE.test(text))return true;
+    // DOI 和 URL 路径中的四位数字不是作者后的出版年份。
+    // 例如“System, 109. doi:10.1016/j.system.2022.102870”是期刊续行。
+    const header=text.replace(/(?:https?:\/\/|doi\s*:\s*|10\.\d{4,9}\/)[^\s]+/gi, "");
+    const hasYear=/(?:^|[\s(,.;])(?:19|20)\d{2}[a-z]?(?:[\s),.;:]|$)/i.test(header);
     if(!hasYear)return false;
-    return /^(?:[A-Z\p{Lu}][\p{L}'’.-]+(?:\s+[A-Z\p{Lu}][\p{L}'’.-]+){0,5}\s*,|[A-Z\p{Lu}][\p{L}'’.-]+\s+(?:[A-Z]\.?\s*){1,4}(?:,|\s)|[^.!?\n]{2,120}\.\s*\((?:19|20)\d{2}|[\p{Script=Han}]{2,}(?:[，,、]|\s))/u.test(text);
+    return /^(?:[A-Z\p{Lu}][\p{L}\p{M}'’.\p{Pd}]+(?:\s+[A-Z\p{Lu}][\p{L}\p{M}'’.\p{Pd}]+){0,5}\s*,|[A-Z\p{Lu}][\p{L}\p{M}'’.\p{Pd}]+\s+(?:[A-Z]\.?\s*){1,4}(?:,|\s)|[^.!?\n]{2,120}\.\s*\((?:19|20)\d{2}|[\p{Script=Han}]{2,}(?:[，,、]|\s))/u.test(text);
   }
 
   function isReferenceHeading(line=""){
@@ -26,7 +51,8 @@
   function isReferenceEndHeading(line=""){
     const text=String(line).replace(/\s+/g," ").trim();
     if(!text||text.length>90)return false;
-    if(/^(?:\d+[.)]\s*)?(?:appendix|appendices)(?:\s+[A-Z0-9IVX]+)?(?:\s*[:.\-–—]\s*[^.!?]{1,60})?$/i.test(text))return true;
+    // 附录编号后可直接接标题，如“Appendix A Interview protocol”。
+    if(/^(?:\d+[.)]\s*)?(?:appendix|appendices|appendixes)(?:\s+(?:[A-Z]|\d+|[IVX]+)(?:\s+[^.!?]{1,60})?)?(?:\s*[:.\-–—]\s*[^.!?]{1,60})?$/i.test(text))return true;
     return /^(?:\d+[.)]\s*)?附录(?:\s*[A-Z0-9IVX一二三四五六七八九十]+)?(?:\s*[:：.\-–—]\s*[^。！？]{1,60})?$/.test(text);
   }
 
@@ -62,9 +88,9 @@
     if(bracketed&&bracketed.length>=2){
       return source.split(/(?:^|\n|\s)\[\d+\]\s+/).map(x=>x.trim()).filter(x=>x.length>=MIN_REFERENCE_LENGTH);
     }
-    const numbered=source.match(/(?:^|\n)\s*\d{1,3}[.)]\s+/g);
+    const numbered=source.match(new RegExp(NUMBERED_REFERENCE_RE.source,"gim"));
     if(numbered&&numbered.length>=2){
-      return source.split(/(?:^|\n)\s*\d{1,3}[.)]\s+/).map(x=>x.trim()).filter(x=>x.length>=MIN_REFERENCE_LENGTH);
+      return source.split(new RegExp(NUMBERED_REFERENCE_RE.source,"gim")).map(x=>x.trim()).filter(x=>x.length>=MIN_REFERENCE_LENGTH);
     }
     if(/\n\s*\n/.test(source)){
       return source.split(/\n\s*\n/).map(x=>x.trim()).filter(x=>x.length>=MIN_REFERENCE_LENGTH);
@@ -134,7 +160,7 @@
     const nonEmpty=prepared.filter(x=>x.text);
     if(!nonEmpty.length)return[];
     const bracketMode=nonEmpty.filter(x=>/^\[\d+\]\s+/.test(x.text)).length>=2;
-    const numberMode=!bracketMode&&nonEmpty.filter(x=>/^\d{1,3}[.)]\s+/.test(x.text)).length>=2;
+    const numberMode=!bracketMode&&nonEmpty.filter(x=>NUMBERED_REFERENCE_RE.test(x.text)).length>=2;
     const blankMode=!bracketMode&&!numberMode&&prepared.some(x=>!x.text);
     const groups=[];
     let current=[];
@@ -142,15 +168,26 @@
       if(current.length&&current.map(x=>x.text).join(" ").length>=MIN_REFERENCE_LENGTH)groups.push(current.map(x=>x.item));
       current=[];
     };
-    for(const entry of prepared){
+    for(let index=0;index<prepared.length;index++){
+      const entry=prepared[index];
       if(!entry.text){if(blankMode)flush();continue;}
       if(/^(?:\[\d+\]|\d{1,3}[.)]?)\s*$/.test(entry.text)){flush();continue;}
       let starts=false;
       if(bracketMode)starts=/^\[\d+\]\s+/.test(entry.text);
-      else if(numberMode)starts=/^\d{1,3}[.)]\s+/.test(entry.text);
-      else if(!blankMode)starts=isLikelyReferenceStart(entry.text);
+      else if(numberMode)starts=NUMBERED_REFERENCE_RE.test(entry.text);
+      else if(!blankMode){
+        starts=isLikelyReferenceStart(entry.text);
+        if(!starts&&AUTHOR_START_RE.test(entry.text)){
+          const header=prepared.slice(index,index+8).map(x=>x.text).join(" ").slice(0,1200);
+          starts=referenceStartOffsets(header)[0]===0;
+        }
+      }
       const previous=current.length?current[current.length-1].text:"";
-      const authorListContinues=/(?:[,&]|\band)\s*$/i.test(previous);
+      // 作者名单未读到年份时，下一行仍属于该名单。已读到年份后，
+      // 题名/卷期行末的逗号不能阻止下一条参考文献开始。
+      const currentText=current.map(x=>x.text).join(" ");
+      const authorListContinues=!bracketMode&&!numberMode&&!DATE_RE.test(currentText)&&
+        (AUTHOR_START_RE.test(currentText)||/(?:[,&]|\band)\s*$/i.test(previous));
       if(current.length&&starts&&!authorListContinues)flush();
       current.push(entry);
     }
@@ -162,6 +199,7 @@
     MIN_REFERENCE_LENGTH,
     normalizeBreaks,
     isLikelyReferenceStart,
+    referenceStartOffsets,
     isReferenceHeading,
     isReferenceEndHeading,
     findDocumentSectionBounds,

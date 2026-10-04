@@ -172,8 +172,10 @@ ol.doc-refs li em{ font-style: italic; }
 .hl.flash-hl{ animation: hlFlash 1s ease; }
 
 /* ---------- 审阅视图顶部操作条 ---------- */
-.doc-view-bar{ display:flex; justify-content:flex-start; padding: 4px 0 10px; }
+.doc-view-bar{ display:flex; justify-content:flex-start; gap:8px; flex-wrap:wrap; padding: 4px 0 10px; position:sticky; top:var(--review-nav-height, 0px); z-index:5; background:#fff; }
 .doc-view-bar .td-btn.small{ padding: 4px 10px; font-size: 12px; }
+.doc-view-bar .td-btn:disabled{ opacity:.45; cursor:default; transform:none; }
+#docView .doc-refs-title, #docxSourceView section.docx, #pdfSourceView{ scroll-margin-top:calc(48px + var(--review-nav-height, 0px)); }
 
 /* docx-preview 保留 DOCX 的纸张尺寸、边距、段落、表格和图像。 */
 .td-page.word-source-active{ max-width: none; padding: 20px 12px; background: transparent; box-shadow: none; }
@@ -376,7 +378,7 @@ textarea#txtBody:focus{ border-color: var(--td-blue); }
   padding: 1px 7px; border-radius: 999px; margin-left: 2px;
 }
 .cm-foot{ display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--td-border); }
-.cm-actions{ display: flex; gap: 6px; flex-shrink: 0; }
+.cm-actions{ display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .cm-copy{
   margin-left: auto; flex-shrink: 0; cursor: pointer;
   width: 26px; height: 26px; border-radius: 6px;
@@ -430,7 +432,7 @@ textarea#txtBody:focus{ border-color: var(--td-blue); }
   /* 主体：单列布局，右侧批注栏改为底部抽屉式覆盖 */
   .td-layout{ display: block; height: auto; }
 
-  .td-doc-scroll{ padding: 12px; height: auto; }
+  .td-doc-scroll{ padding: 12px; height: auto; overflow:visible; }
   .td-page{ padding: 20px 16px; border-radius: 8px; box-shadow: none; min-height: auto; }
   .pdf-source-view{ margin:0; }
   .pdf-page-stage{ padding:12px 6px 24px; }
@@ -670,3 +672,12 @@ textarea#txtBody:focus{ border-color: var(--td-blue); }
   padding: 10px 12px; font-size: 12.5px; color: #b0760f; line-height: 1.6; margin: 0 0 12px;
 }
 .verify-foot{ display: flex; gap: 10px; justify-content: flex-end; padding: 14px 18px; border-top: 1px solid var(--td-border); }
+
+/* 原文搜索 */
+.source-search-bar{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; flex:1 1 100%; min-width:0; }
+.source-search-bar[hidden]{ display:none; }
+.source-search-bar input{ flex:1 1 120px; min-width:80px; max-width:320px; height:30px; border:1px solid var(--td-border); border-radius:6px; padding:4px 9px; font:inherit; font-size:13px; background:#fff; color:var(--td-text); }
+.source-search-bar input:focus{ outline:2px solid rgba(22,119,255,.25); border-color:var(--td-blue); }
+.source-search-status{ font-size:12px; color:var(--td-muted); white-space:nowrap; }
+.source-search-match{ background:#fff1a8; color:inherit; border-radius:2px; scroll-margin-top:calc(110px + var(--review-nav-height, 0px)); }
+.source-search-match.active{ background:#ffd666; box-shadow:0 0 0 1px #d99500; }

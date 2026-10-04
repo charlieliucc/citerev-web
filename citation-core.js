@@ -72,12 +72,12 @@
   }
 
   function isInitialToken(tok){
-    return /^([A-Za-z])\.?$/.test((tok ?? "").trim());
+    return /^(\p{L}\p{M}*)\.?$/u.test((tok ?? "").trim());
   }
 
   function isAllInitials(tok){
     const w = (tok ?? "").trim().split(/\s+/).filter(Boolean);
-    return w.length > 0 && w.every(x => /^([A-Za-z])\.?$/.test(x));
+    return w.length > 0 && w.every(x => /^(\p{L}\p{M}*)\.?$/u.test(x));
   }
 
   // ==================================================================
@@ -92,7 +92,7 @@
 
     const initials = [];
     let i = 0;
-    while(i < words.length - 1 && /^([A-Za-z])\.?$/.test(words[i])){
+    while(i < words.length - 1 && /^(\p{L}\p{M}*)\.?$/u.test(words[i])){
       initials.push(words[i].replace(/\./g, "").toLowerCase());
       i++;
     }
@@ -107,11 +107,17 @@
       const rest = parts.slice(1).join(" ");
       const rw = rest.split(/\s+/).filter(Boolean);
       let j = 0; const inits = [];
-      while(j < rw.length && /^([A-Za-z])\.?$/.test(rw[j])){ inits.push(rw[j].replace(/\./g, "").toLowerCase()); j++; }
+      while(j < rw.length && /^(\p{L}\p{M}*)\.?$/u.test(rw[j])){ inits.push(rw[j].replace(/\./g, "").toLowerCase()); j++; }
       return { surname: normalizeSpace(surname), initial: inits[0] || "" };
     }
 
     return { surname: t, initial: "" };
+  }
+
+  // 匹配键统一 Unicode 组合形式及姓名连接号；显示和源文本不改写，
+  // ü、ş 等字母仍参与精确匹配，不移除变音符号。
+  function normalizeAuthorKey(name){
+    return normalizeSpace(name).normalize('NFC').replace(/\p{Pd}/gu, '-').toLowerCase();
   }
 
   function authorKeyPart(author){
@@ -150,13 +156,13 @@
         const seg = segs[i];
         if(isInitialToken(seg) || isAllInitials(seg)){
           if(authors.length === 0 && i === 0){
-            pendingInitial = seg.replace(/\./g, "").toLowerCase().replace(/[^a-z]/g, "").slice(0, 1);
+            pendingInitial = seg.replace(/\./g, "").toLowerCase().match(/\p{L}\p{M}*/u)?.[0] || "";
             i++;
             continue;
           }
           const last = authors[authors.length - 1];
           if(last && !last.initial){
-            last.initial = seg.replace(/\./g, "").toLowerCase().replace(/[^a-z]/g, "").slice(0, 1);
+            last.initial = seg.replace(/\./g, "").toLowerCase().match(/\p{L}\p{M}*/u)?.[0] || "";
           }
           i++;
           continue;
@@ -185,8 +191,8 @@
     const clean = (authors ?? []).filter(a => normalizeSpace(a.surname));
     if(clean.length === 0 || !y) return [];
 
-    const surnames = clean.map(a => normalizeSpace(a.surname).toLowerCase());
-    const parts = clean.map(authorKeyPart).filter(Boolean).map(p => p.toLowerCase());
+    const surnames = clean.map(a => normalizeAuthorKey(a.surname));
+    const parts = clean.map(authorKeyPart).filter(Boolean).map(normalizeAuthorKey);
     const firstSurname = surnames[0];
     const firstPart = parts[0];
 
@@ -228,7 +234,7 @@
     const authorsPart = yearMatch ? text.slice(0, yearMatch.index).trim() : text;
 
     const authors = [];
-    const reSurnameInitial = /([A-Za-z\u00C0-\u017F][A-Za-z\u00C0-\u017F'’\-]+(?:\s+[A-Za-z\u00C0-\u017F][A-Za-z\u00C0-\u017F'’\-]+)*)\s*,\s*([A-Z])/g;
+    const reSurnameInitial = /(\p{L}[\p{L}\p{M}'’\p{Pd}]+(?:\s+\p{L}[\p{L}\p{M}'’\p{Pd}]+)*)\s*,\s*(\p{Lu}\p{M}*)/gu;
     let m;
     while((m = reSurnameInitial.exec(authorsPart))){
       authors.push({ surname: m[1], initial: (m[2] ?? "").toLowerCase() });
@@ -281,11 +287,21 @@
   // ==================================================================
   // 文中引用提取
   // ==================================================================
-  function cleanParentheticalAuthor(pre){
+  function cleanParentheticalAuthor(pre, parsedRefs = []){
     let s = normalizeSpace(pre).replace(/[,;:\s]+$/g, "");
     s = s.replace(/\b(?:see|e\.g\.|i\.e\.|cf\.|viz\.)\.?[,\s:]*/gi, " ");
     s = s.replace(/\b(?:based\s+on|according\s+to|as\s+(?:discussed|noted|shown|reported|argued|demonstrated|mentioned)\s+(?:by)?|in\s+line\s+with|following|for\s+(?:example|instance)|as\s+cited\s+in)\b[,\s:]*/gi, " ");
     s = normalizeSpace(s);
+
+    // 说明文字可以包含逗号、并列短语和 AWE 等缩写。只在最后一个
+    // in/by/from 后的作者与参考文献姓氏完全一致时提取作者部分。
+    // 完整作者名优先；不根据年份或相似拼写猜测，以保留缺失/错年提示。
+    const explanation = s.match(/^.+\b(?:in|by|from)\s+(.+)$/i);
+    if(explanation){
+      const known = new Set(parsedRefs.flatMap(ref => ref.authors || []).map(author => normalizeAuthorKey(author.surname)));
+      const firstSurname = value => normalizeSpace(parseInTextAuthorList(value, { allowAnd:false }).authors[0]?.surname).toLowerCase();
+      if(!known.has(firstSurname(s)) && known.has(firstSurname(explanation[1]))) s = explanation[1];
+    }
 
     let segs = s.split(/\s*,\s*/).map(x => x.trim()).filter(Boolean);
     while(segs.length > 1){
@@ -299,7 +315,69 @@
     return segs.join(", ");
   }
 
-  function extractCitationsFromBody(bodyText){
+  // 日期或时间范围不属于作者—年份引用。只排除完整的日期形状，
+  // 不能仅凭 May 等月份单词排除同姓作者（例如 May, 2024）。
+  function isCalendarDateChunk(chunk){
+    const month = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\.?';
+    const date = '(?:' + month + '\\s+(?:\\d{1,2},?\\s+)?\\d{4}|\\d{1,2}\\s+' + month + '\\s+\\d{4}|\\d{4}(?:[/.\\-]\\d{1,2}){0,2})';
+    return new RegExp('^' + date + '(?:\\s*(?:[–—-]|to|through)\\s*' + date + ')?$', 'i').test(normalizeSpace(chunk));
+  }
+
+  function isContactDetailsChunk(chunk){
+    const value=normalizeSpace(chunk);
+    return /^(?:e-?mail|telephone(?:\s+number)?|phone(?:\s+number)?|office\s+address)\s*:/i.test(value) ||
+      /^[^@\s;()]+@[^@\s;()]+\.[^@\s;()]+$/.test(value);
+  }
+
+  function narrativeAuthorSpan(raw, parsedRefs = []){
+    let start = 0;
+    // 空行是段落/标题边界；普通换行仍允许拆行姓名和多作者引用。
+    for(const match of raw.matchAll(/\n[ \t]*\n[\s]*/g)) start = match.index + match[0].length;
+    let value = raw.slice(start);
+    // 句首引导语不属于作者名；先保护完整的第一作者姓氏/机构名，
+    // 再去除已知引导语，避免误删 After School 等真实机构作者。
+    // 此边界识别不依赖年份，缺失条目和错年仍交给后续匹配检查。
+    const firstAuthor = parseInTextAuthorList(value, { allowAnd:true }).authors[0];
+    const knownFirstName = firstAuthor && parsedRefs.some(ref => (ref.authors || []).some(author => normalizeAuthorKey(author.surname) === normalizeAuthorKey(firstAuthor.surname)));
+    const leadRe = /^(?:see(?:\s+also)?|according\s+to|(?:building|based)\s+on|(?:beginning|starting)\s+with|as\s+(?:shown|noted|reported|argued)\s+by|citing|following|after|before|later|though|although|unlike|as|in|cf\.?|e\.g\.?|i\.e\.?|viz\.?)\b\s+/i;
+    if(!knownFirstName){
+      // TP. According to Barkhuizen 是上一句句尾加新句引导语。
+      // 只在句号之后确有引导语时切开，保留 J. R. Smith 等姓名首字母。
+      for(const boundary of value.matchAll(/[.!?]\s+/g)){
+        const offset=boundary.index+boundary[0].length;
+        if(leadRe.test(value.slice(offset))){ start+=offset; value=raw.slice(start); break; }
+      }
+    }
+    const prefix = !knownFirstName && value.match(leadRe);
+    if(prefix){ start += prefix[0].length; value = raw.slice(start); }
+    // PDF 可能只保留一个换行，或把标题与下一行合并为空格。
+    const heading = value.match(/^(?:The\s+)?(?:[A-Z][A-Za-z]*\s+)*(?:Approach|Framework|Methodology|Overview)\s+(?=[A-Z])/);
+    if(heading){ start += heading[0].length; value = raw.slice(start); }
+    const leadingSpace = value.match(/^\s*/)[0].length;
+    start += leadingSpace;
+    return { start, value: raw.slice(start).trimEnd() };
+  }
+
+  function resolveNarrativeAuthors(authors, parsedRefs){
+    const knownAuthors = parsedRefs.flatMap(ref => ref.authors || []);
+    return authors.map(author => {
+      const name = normalizeSpace(author.surname);
+      // 完整姓氏优先，保留复姓和机构名。只有参考文献提供了姓氏和
+      // 相符的名字首字母时，才把 Erving Goffman 解析为 Goffman, E.
+      if(knownAuthors.some(known => normalizeAuthorKey(known.surname) === normalizeAuthorKey(name))) return author;
+      const matches = knownAuthors.filter(known => {
+        const surname = normalizeSpace(known.surname);
+        if(!known.initial || !name.toLowerCase().endsWith(' ' + surname.toLowerCase())) return false;
+        const given = name.slice(0, name.length - surname.length).trim();
+        return /^[A-Z\u00C0-\u017F][A-Za-z\u00C0-\u017F'’.-]*(?:\s+[A-Z\u00C0-\u017F][A-Za-z\u00C0-\u017F'’.-]*)*$/.test(given) &&
+          given[0].toLowerCase() === known.initial.toLowerCase();
+      }).sort((a, b) => b.surname.length - a.surname.length);
+      if(!matches.length) return author;
+      return { surname: matches[0].surname, initial: matches[0].initial };
+    });
+  }
+
+  function extractCitationsFromBody(bodyText, parsedRefs = []){
     const text = (bodyText ?? "").replace(/\r\n/g, "\n");
     const citations = [];
     const stopwords = new Set(["figure","table","section","chapter","note","appendix","equation","example","vol","no","pp","p","eq","ref","ibid","see","note","id"]);
@@ -310,36 +388,48 @@
       const inside = pm[1];
       const chunks = inside.split(/\s*;\s*/g).map(s => s.trim()).filter(Boolean);
       for(const chunk of chunks){
+        if(isCalendarDateChunk(chunk) || isContactDetailsChunk(chunk)) continue;
         const cleaned = chunk.replace(/\bpp?\.?\s*\d+(?:[\-–]\d+)?\b/gi, "");
-        const years = cleaned.match(/\d{4}[a-z]?/gi) || [];
-        if(years.length === 0) continue;
-        const firstYearIdx = cleaned.search(/\d{4}[a-z]?/i);
-        const authorPart = firstYearIdx >= 0 ? cleaned.slice(0, firstYearIdx) : cleaned;
-        const ap = normalizeSpace(cleanParentheticalAuthor(authorPart));
+        // retrieved/accessed 后的是检索日期，不能用作出版年份匹配。
+        // 若没有出版年份，保留一项待核对提示，避免断言文献缺失。
+        const retrieval = cleaned.match(/\b(?:retrieved|accessed)\s+(?:[^,;()]*?\s+)?(\d{4}[a-z]?)\b/i);
+        const publication = retrieval ? cleaned.slice(0,retrieval.index) : cleaned;
+        const years = publication.match(/\d{4}[a-z]?/gi) || [];
+        if(years.length === 0 && !retrieval) continue;
+        const firstYearIdx = publication.search(/\d{4}[a-z]?/i);
+        const authorPart = firstYearIdx >= 0 ? publication.slice(0, firstYearIdx) : publication;
+        const ap = normalizeSpace(cleanParentheticalAuthor(authorPart, parsedRefs));
         if(!ap) continue;
         if(!/[A-Za-z\u00C0-\u017F]/.test(ap)) continue;
         const { authors, etal } = parseInTextAuthorList(ap, { allowAnd:false });
         if(authors.length === 0) continue;
-        citations.push({ authorsRaw: ap, year: normalizeYear(years[0]), authors, etal, citationType: 'parenthetical', raw: `(${chunk})`, start: pm.index, end: pm.index + pm[0].length });
+        citations.push({ authorsRaw: ap, year: normalizeYear(years[0]), ...(years.length ? {} : { retrievalYear: normalizeYear(retrieval[1]) }), authors, etal, citationType: 'parenthetical', raw: `(${chunk})`, start: pm.index, end: pm.index + pm[0].length });
       }
     }
 
-    const narrativeRe = /\b([A-Z][A-Za-z'’\-]*(?:\.?\s+(?:[A-Z][A-Za-z'’\-]*\.?|and|&|et\s+al\.?|of|the|for|on|in|to|by|with|de|van|der|la|du|des|del|y))*)\s*'?s?\s*\((\d{4}[a-z]?)\)/g;
+    const narrativeRe = /(?<![\p{L}\p{M}])((?:\p{Lu}[\p{L}\p{M}'’\p{Pd}]*|de|van|von|der|la|du|des|del)(?:\.?\s+(?:\p{Lu}[\p{L}\p{M}'’\p{Pd}]*\.?|and|&|et\s+al\.?|of|the|for|on|in|to|by|with|de|van|von|der|la|du|des|del|y))*)\s*(?:['’]s)?\s*\((\d{4}[a-z]?)\)/gu;
     let nm;
     while((nm = narrativeRe.exec(text))){
-      let authorToken = nm[1];
+      const span = narrativeAuthorSpan(nm[1], parsedRefs);
+      let authorToken = normalizeSpace(span.value);
+      let start = nm.index + span.start;
       if(/\)\s*$/.test(authorToken)) continue;
-      authorToken = normalizeSpace(authorToken.replace(/^(?:see(?:\s+also)?|according\s+to|as\s+(?:shown|noted|reported)\s+by|citing|cf\.?|e\.g\.?|i\.e\.?|viz\.?)\b\s*/gi, ""));
       let guard = 0;
       let firstWord = normalizeSpace(authorToken).toLowerCase().split(/\s+/)[0];
       while(stopwords.has(firstWord) && guard++ < 4){
+        const removed = text.slice(start, nm.index + nm[1].length).match(/^\S+\s+/);
+        if(!removed) break;
+        start += removed[0].length;
         authorToken = normalizeSpace(authorToken.replace(/^\S+\s+/, ""));
         firstWord = normalizeSpace(authorToken).toLowerCase().split(/\s+/)[0];
       }
       if(!authorToken || stopwords.has(firstWord)) continue;
-      const { authors, etal } = parseInTextAuthorList(authorToken, { allowAnd:true });
+      const parsed = parseInTextAuthorList(authorToken, { allowAnd:true });
+      const authors = resolveNarrativeAuthors(parsed.authors, parsedRefs);
+      const etal = parsed.etal;
       if(authors.length === 0) continue;
-      citations.push({ authorsRaw: authorToken, year: normalizeYear(nm[2]), authors, etal, citationType: 'narrative', raw: nm[0], start: nm.index, end: nm.index + nm[0].length });
+      const end = nm.index + nm[0].length;
+      citations.push({ authorsRaw: authorToken, year: normalizeYear(nm[2]), authors, etal, citationType: 'narrative', raw: text.slice(start, end), start, end });
     }
 
     return citations;

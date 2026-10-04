@@ -163,6 +163,7 @@
         delete paragraph.dataset.cmids;
       });
       container.querySelectorAll('[data-source-page]').forEach(paragraph => { delete paragraph.dataset.sourcePage; });
+      container.querySelectorAll('[data-reference-index]').forEach(paragraph => { delete paragraph.dataset.referenceIndex; });
     }
 
     function applyAnnotations() {
@@ -209,6 +210,7 @@
         const found = findParagraph(paragraphs, candidate, refCursor);
         if (found < 0) return;
         refCursor = found + 1;
+        paragraphs[found].dataset.referenceIndex = String(index);
         if (Number(block.page) > 0) paragraphs[found].dataset.sourcePage = String(block.page);
         if (!mark?.id) return;
         const paragraph = paragraphs[found];

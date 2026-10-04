@@ -80,8 +80,9 @@
     } catch (_) {}
     const names = [font?.name, font?.loadedName, font?.fallbackName, styles?.[item.fontName]?.fontFamily].filter(Boolean).join(' ');
     return {
-      italic: font ? !!font.italic : /(?:italic|oblique)/i.test(names),
+      italic: !!font?.italic || /(?:italic|oblique)/i.test(names),
       bold: font ? !!font.bold : /(?:bold|semibold|demibold)/i.test(names),
+      styleInfoAvailable: !!font || /(?:italic|oblique|bold|times|arial|helvetica|courier)/i.test(names),
       fontName: font?.name || styles?.[item.fontName]?.fontFamily || item.fontName || ''
     };
   }
@@ -100,6 +101,7 @@
       html: '',
       italics: [],
       bolds: [],
+      styleInfoAvailable: true,
       sourceSpans: []
     };
   }
@@ -123,6 +125,7 @@
     const end = line.text.length;
     if (token.italic) line.italics.push([start, end]);
     if (token.bold) line.bolds.push([start, end]);
+    line.styleInfoAvailable = line.styleInfoAvailable && token.styleInfoAvailable;
     line.sourceSpans.push({
       start,
       end,
@@ -219,6 +222,7 @@
       html,
       italics,
       bolds,
+      styleInfoAvailable: lines.filter(line => line?.text).every(line => line.styleInfoAvailable === true),
       page: pages[0] || null,
       pageEnd: pages[pages.length - 1] || pages[0] || null,
       pages,
@@ -229,7 +233,7 @@
   function documentFromLines(lines, pageCount, pageLabels) {
     const bounds = global.CitationReferenceSplitter?.findDocumentSectionBounds(lines, line => cleanText(line?.text)) || { found: false, headingIndex: -1, referenceStart: -1, referenceEnd: lines.length, appendixIndex: -1 };
     const bodyLines = bounds.found ? [...lines.slice(0, bounds.headingIndex), ...lines.slice(bounds.appendixIndex)] : [];
-    const referenceLines = bounds.found ? lines.slice(bounds.referenceStart, bounds.referenceEnd) : lines;
+    const referenceLines = splitReferenceLines(bounds.found ? lines.slice(bounds.referenceStart, bounds.referenceEnd) : lines);
     const grouped = global.CitationReferenceSplitter?.groupReferenceLines(referenceLines, line => line?.text) || referenceLines.map(line => [line]);
     const bodyBlocks = bodyLines.map(line => combineLines([line]));
     const referenceBlocks = grouped.map(combineLines).filter(block => block.text);
@@ -244,8 +248,42 @@
       hasPageInfo: true,
       pageCount,
       pageLabels,
-      styleInfoAvailable: [...bodyBlocks, ...referenceBlocks].some(block => block.italics.length || block.bolds.length)
+      styleInfoAvailable: [...bodyBlocks, ...referenceBlocks].some(block => block.styleInfoAvailable)
     };
+  }
+
+  function splitReferenceLines(lines) {
+    return lines.flatMap(line => {
+      const offsets = global.CitationReferenceSplitter?.referenceStartOffsets(line.text) || [];
+      const cuts = [0, ...offsets.filter(offset => offset > 0), line.text.length];
+      if (cuts.length === 2) return [line];
+      return cuts.slice(0, -1).map((start, index) => {
+        const end = cuts[index + 1];
+        const raw = line.text.slice(start, end);
+        const trimmed = raw.trim();
+        if (!trimmed) return null;
+        const from = start + raw.indexOf(trimmed), to = from + trimmed.length;
+        const clipRanges = ranges => (ranges || []).map(([s, e]) => [Math.max(s, from) - from, Math.min(e, to) - from]).filter(([s, e]) => e > s);
+        const italics = clipRanges(line.italics), bolds = clipRanges(line.bolds);
+        const boundaries = [...new Set([0, trimmed.length, ...italics.flat(), ...bolds.flat()])].sort((a, b) => a - b);
+        const html = boundaries.slice(0, -1).map((s, i) => {
+          const e = boundaries[i + 1];
+          let segment = esc(trimmed.slice(s, e));
+          if (italics.some(([a, b]) => a <= s && b >= e)) segment = '<em>' + segment + '</em>';
+          if (bolds.some(([a, b]) => a <= s && b >= e)) segment = '<strong>' + segment + '</strong>';
+          return segment;
+        }).join('');
+        const sourceSpans = (line.sourceSpans || []).flatMap(span => {
+          const s = Math.max(span.start, from), e = Math.min(span.end, to);
+          if (e <= s) return [];
+          const length = span.end - span.start;
+          return [{ ...span, start: s - from, end: e - from,
+            x: span.x + span.width * (s - span.start) / length,
+            width: span.width * (e - s) / length }];
+        });
+        return { ...line, text: trimmed, html, italics, bolds, sourceSpans };
+      }).filter(Boolean);
+    });
   }
 
   async function parse(file, onProgress) {
@@ -283,6 +321,7 @@
   function createViewer(container) {
     let pdf = null, loadingTask = null, pdfjs = null, pageNumber = 1, zoom = 1, labels = null, selectedAnchor = null, renderSerial = 0;
     container.innerHTML = '<div class="pdf-source-toolbar"><button type="button" data-pdf-action="prev" aria-label="上一页">‹</button><label>第 <input type="text" inputmode="text" data-pdf-page-input value="1" aria-label="跳转到 PDF 页码"> / <b data-pdf-total>1</b> 页</label><button type="button" data-pdf-action="go" aria-label="跳转到页码">跳转</button><button type="button" data-pdf-action="next" aria-label="下一页">›</button><span data-pdf-page-label class="pdf-page-label"></span><span data-pdf-page-error class="pdf-page-error" role="status" aria-live="polite"></span><span class="pdf-toolbar-gap"></span><button type="button" data-pdf-action="out" aria-label="缩小">−</button><span data-pdf-zoom>100%</span><button type="button" data-pdf-action="in" aria-label="放大">＋</button></div><div class="pdf-page-stage"><div class="pdf-page-surface"><canvas></canvas><div class="pdf-text-layer textLayer"></div><div class="pdf-highlight-layer"></div></div></div>';
+    let activeRenderTask = null;
     const pageInput = container.querySelector('[data-pdf-page-input]');
     const totalEl = container.querySelector('[data-pdf-total]');
     const pageLabelEl = container.querySelector('[data-pdf-page-label]');
@@ -323,7 +362,9 @@
     async function render() {
       if (!pdf) return;
       const serial = ++renderSerial;
+      activeRenderTask?.cancel();
       const page = await pdf.getPage(pageNumber);
+      if (serial !== renderSerial || !pdf) return;
       const available = Math.max(320, stage.clientWidth - 28);
       const base = page.getViewport({ scale: 1 });
       const scale = Math.min(1.6, available / base.width) * zoom;
@@ -337,7 +378,11 @@
       surface.style.height = viewport.height + 'px';
       surface.style.setProperty('--total-scale-factor', String(scale));
       const context = canvas.getContext('2d', { alpha: false });
-      await page.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }).promise;
+      const task = page.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] });
+      activeRenderTask = task;
+      try { await task.promise; }
+      catch (error) { if (error?.name === 'RenderingCancelledException') return; throw error; }
+      finally { if (activeRenderTask === task) activeRenderTask = null; }
       if (serial !== renderSerial) return;
       textLayer.replaceChildren();
       const content = await getTextContentCompat(page);
@@ -366,6 +411,7 @@
     }
 
     async function load(bytes, pageLabels) {
+      searchPages = null;
       if (!bytes?.byteLength) return;
       if (loadingTask) await loadingTask.destroy();
       pdfjs = await loadPdfJs();
@@ -378,6 +424,35 @@
       totalEl.textContent = pdf.numPages;
       updatePageControls();
       await render();
+    }
+
+    let searchPages = null;
+    async function search(query) {
+      if (!pdf || !global.CitationDocumentSearch) return [];
+      const document = pdf;
+      if (!searchPages) {
+        searchPages = (async () => {
+          const blocks = [];
+          for (let number = 1; number <= document.numPages; number++) {
+            const page = await document.getPage(number);
+            const content = await getTextContentCompat(page);
+            blocks.push(combineLines(pageLines(page, number, labels?.[number - 1] || String(number), content)));
+          }
+          return blocks;
+        })();
+      }
+      const blocks = await searchPages;
+      if (pdf !== document) return [];
+      return blocks.flatMap(block => global.CitationDocumentSearch.findMatches(block.text, query).map(match => ({
+        page: block.page,
+        sourceSpans: block.sourceSpans.filter(span => span.end > match.start && span.start < match.end),
+        searchMatch: true
+      })));
+    }
+    function clearSearch() {
+      if (!selectedAnchor?.searchMatch) return;
+      selectedAnchor = null;
+      highlightLayer.replaceChildren();
     }
 
     async function locate(anchor) {
@@ -408,6 +483,8 @@
     });
 
     async function destroy() {
+      activeRenderTask?.cancel();
+      searchPages = null;
       renderSerial++;
       if (loadingTask) await loadingTask.destroy();
       pdf = null;
@@ -418,7 +495,7 @@
       highlightLayer.replaceChildren();
     }
 
-    return { load, locate, goToPage, render, destroy, get pageNumber() { return pageNumber; } };
+    return { load, locate, search, clearSearch, goToPage, render, destroy, get pageNumber() { return pageNumber; } };
   }
 
   global.CitationPdfImporter = Object.freeze({ parse, createViewer, loadPdfJs, resolvePageNumber });

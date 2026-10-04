@@ -133,6 +133,7 @@
         const source = lastReferenceSourceBlocks[index];
         if(!source) return;
         block.sourceSpans = source.sourceSpans || [];
+        block.styleInfoAvailable = source.styleInfoAvailable === true;
         block.pages = source.pages || [];
         block.page = source.page || block.page;
         block.pageEnd = source.pageEnd || block.page;
@@ -226,6 +227,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
 
   function clearAll(){
     commentState.clear();
+    resetIgnoredCategories();
+    resetSourceSearch();
     lastBodyParagraphs = null;
     lastBodySourceBlocks = [];
     lastReferenceSourceBlocks = [];
@@ -338,7 +341,10 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     const { viewer } = ensureDocxViewer();
     if(!viewer){ showImportMsg('err', 'Word 原文渲染模块未加载，请刷新页面。'); return; }
     viewer.load(data).then(() => {
-      if(currentDocxBytes === data && currentSourceType === 'word' && !document.getElementById('docView').hidden) showPageStatus();
+      if(currentDocxBytes === data && currentSourceType === 'word' && !document.getElementById('docView').hidden){
+        showPageStatus();
+        if(!sourceSearchBar.hidden && sourceSearchInput.value.trim()) searchSource();
+      }
     }).catch(error => {
       if(currentDocxBytes !== data) return;
       currentDocxBytes = null;
@@ -406,6 +412,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       return;
     }
 
+    resetSourceSearch();
     const { body, bodyParagraphs, refsParagraphs, note } = splitBodyAndReferences(fullText);
     currentSourceType = 'word';
     currentPdfBytes = null;
@@ -422,7 +429,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       const page = refsParagraphs[index] && Number(refsParagraphs[index].page);
       if(Number.isInteger(page) && page > 0) line.dataset.page = String(page);
     });
-    runCheck();
+    startCheck();
     updateFileNameBadge(file.name);
     try { localStorage.setItem("cr_current_file", file.name); } catch(e){}
     if(note){
@@ -435,6 +442,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   }
 
   async function applyPdfDocument(result, fileName, autoRun){
+    resetSourceSearch();
+    resetIgnoredCategories();
     currentDocxBytes = null;
     currentDocxKey = null;
     docxViewer?.clear();
@@ -505,11 +514,144 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     if(pdfMode){ hidePageStatus(); pdfViewer?.render(); }
     else if(wordMode) showPageStatus();
     else if(lastBodyParagraphs) showPageStatus(); else hidePageStatus();
+    const jumpButton = document.getElementById('btnJumpReferences');
+    if(jumpButton) jumpButton.disabled = !refs?.children.length;
   }
   function showEdit(){
+    resetSourceSearch();
     document.getElementById('docView').hidden = true;
     document.getElementById('editArea').hidden = false;
+    const jumpButton = document.getElementById('btnJumpReferences');
+    if(jumpButton) jumpButton.disabled = true;
     hidePageStatus();
+  }
+
+  // 原文搜索：仅改变审阅视图的高亮，不改变输入内容和检测规则。
+  const sourceSearchBar = document.getElementById('sourceSearchBar');
+  const sourceSearchInput = document.getElementById('sourceSearchInput');
+  let sourceSearchMatches = [], sourceSearchIndex = -1, sourceSearchSerial = 0;
+  let sourceSearchTimer = null, sourceSearchQuery = '';
+
+  function updateSourceSearchStatus(message){
+    document.getElementById('sourceSearchStatus').textContent = message || (sourceSearchMatches.length ? `${sourceSearchIndex + 1} / ${sourceSearchMatches.length}` : '未找到');
+    document.getElementById('sourceSearchPrev').disabled = !sourceSearchMatches.length;
+    document.getElementById('sourceSearchNext').disabled = !sourceSearchMatches.length;
+  }
+  function clearSourceSearchMarks(){
+    window.CitationDocumentSearch.clear(document.getElementById('docView'));
+    pdfViewer?.clearSearch?.();
+  }
+  function resetSourceSearch(){
+    sourceSearchSerial++;
+    clearTimeout(sourceSearchTimer);
+    sourceSearchMatches = [];
+    sourceSearchIndex = -1;
+    sourceSearchQuery = '';
+    clearSourceSearchMarks();
+    sourceSearchBar.hidden = true;
+    sourceSearchInput.value = '';
+    document.getElementById('btnSearchSource').setAttribute('aria-expanded', 'false');
+    updateSourceSearchStatus('输入关键词');
+  }
+  async function locateSourceSearchMatch(){
+    const match = sourceSearchMatches[sourceSearchIndex];
+    if(!match) return;
+    if(match.sourceSpans){
+      await pdfViewer?.locate(match);
+    }else{
+      document.querySelectorAll('.source-search-match.active').forEach(el => el.classList.remove('active'));
+      match.elements.forEach(el => el.classList.add('active'));
+      match.elements[0]?.scrollIntoView({ block:'center', behavior:'smooth' });
+    }
+  }
+  async function searchSource(){
+    const serial = ++sourceSearchSerial;
+    const query = sourceSearchInput.value.trim();
+    clearSourceSearchMarks();
+    sourceSearchQuery = query;
+    sourceSearchMatches = [];
+    sourceSearchIndex = -1;
+    if(!query){ updateSourceSearchStatus('输入关键词'); return; }
+    updateSourceSearchStatus('搜索中…');
+    try{
+      let matches;
+      if(currentSourceType === 'pdf' && currentPdfBytes){
+        matches = await pdfViewer.search(query);
+      }else{
+        if(currentSourceType === 'word' && currentDocxBytes && !docxViewer?.rendered){
+          updateSourceSearchStatus('原文正在加载');
+          return;
+        }
+        const roots = currentSourceType === 'word' && currentDocxBytes
+          ? [...document.querySelectorAll('#docxSourceView section.docx p')]
+          : [document.getElementById('docBody'), ...document.querySelectorAll('#docRefs > li')].filter(el => el && !el.hidden);
+        matches = roots.flatMap(root => window.CitationDocumentSearch.highlight(root, query));
+      }
+      if(serial !== sourceSearchSerial || sourceSearchBar.hidden) return;
+      sourceSearchMatches = matches;
+      sourceSearchIndex = matches.length ? 0 : -1;
+      updateSourceSearchStatus();
+      await locateSourceSearchMatch();
+    }catch(error){
+      if(serial === sourceSearchSerial) updateSourceSearchStatus('搜索失败，请重试');
+    }
+  }
+  function moveSourceSearch(direction){
+    if(sourceSearchInput.value.trim() !== sourceSearchQuery){ searchSource(); return; }
+    if(!sourceSearchMatches.length) return;
+    sourceSearchIndex = (sourceSearchIndex + direction + sourceSearchMatches.length) % sourceSearchMatches.length;
+    updateSourceSearchStatus();
+    locateSourceSearchMatch().catch(() => updateSourceSearchStatus('定位失败，请重试'));
+  }
+  document.getElementById('btnSearchSource').addEventListener('click', () => {
+    if(!sourceSearchBar.hidden){ resetSourceSearch(); return; }
+    sourceSearchBar.hidden = false;
+    document.getElementById('btnSearchSource').setAttribute('aria-expanded', 'true');
+    updateSourceSearchStatus('输入关键词');
+    sourceSearchInput.focus();
+  });
+  sourceSearchInput.addEventListener('input', () => {
+    sourceSearchSerial++;
+    clearTimeout(sourceSearchTimer);
+    sourceSearchMatches = [];
+    sourceSearchIndex = -1;
+    updateSourceSearchStatus(sourceSearchInput.value.trim() ? '搜索中…' : '输入关键词');
+    sourceSearchTimer = setTimeout(searchSource, 180);
+  });
+  sourceSearchInput.addEventListener('keydown', event => {
+    if(event.key === 'Escape'){
+      event.preventDefault(); resetSourceSearch(); document.getElementById('btnSearchSource').focus();
+    }else if(event.key === 'Enter'){
+      event.preventDefault(); clearTimeout(sourceSearchTimer);
+      moveSourceSearch(event.shiftKey ? -1 : 1);
+    }
+  });
+  document.getElementById('sourceSearchPrev').addEventListener('click', () => moveSourceSearch(-1));
+  document.getElementById('sourceSearchNext').addEventListener('click', () => moveSourceSearch(1));
+  document.getElementById('sourceSearchClose').addEventListener('click', resetSourceSearch);
+
+
+  async function jumpToReferences(){
+    if(currentSourceType === 'pdf' && currentPdfBytes){
+      const page = lastReferenceSourceBlocks.find(block => block?.text)?.page;
+      if(page && pdfViewer){
+        await pdfViewer.locate({ page });
+        document.getElementById('pdfSourceView')?.scrollIntoView({ block:'start', behavior:'smooth' });
+        return;
+      }
+      showImportMsg('err', '未找到参考文献所在的 PDF 页。');
+      return;
+    }
+    if(currentSourceType === 'word' && currentDocxBytes){
+      const reference = document.querySelector('#docxSourceView [data-reference-index="0"]');
+      if(!reference){
+        showImportMsg('err', docxViewer?.rendered ? '未能在 Word 原文中定位参考文献。' : 'Word 原文正在渲染，请稍后再试。');
+        return;
+      }
+      (reference.closest('section.docx') || reference).scrollIntoView({ block:'start', behavior:'smooth' });
+      return;
+    }
+    document.querySelector('#docView .doc-refs-title')?.scrollIntoView({ block:'start', behavior:'smooth' });
   }
 
   function buildHighlightedHtml(text, ranges){
@@ -684,7 +826,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     if(visible.length === 0){
       const empty = document.createElement('div');
       empty.className = 'cm-empty';
-      empty.textContent = '🎉 未发现引用一致性或格式问题。';
+      empty.textContent = comments.length ? '本次问题已全部解决或忽略。' : '🎉 未发现引用一致性或格式问题。';
       list.appendChild(empty);
       return;
     }
@@ -695,10 +837,11 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     for(const c of visible){
       const color = c.color || 'format';
       const tag = c.tag || '格式问题';
-      const key = color + '\u0000' + tag;
+      const key = commentCategoryKey(color, tag);
       if(!catMap.has(key)) catMap.set(key, { color, tag, count: 0 });
       catMap.get(key).count++;
     }
+    if(activeFilter !== null && !catMap.has(activeFilter)) activeFilter = null;
     const cats = [...catMap.values()].sort(catSort);
 
     const summary = document.createElement('div');
@@ -706,7 +849,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     // 最前面固定「全部」，其余为各分类；点击某分类仅显示该类条目
     summary.innerHTML = '<div class="cm-stat cm-chip' + (activeFilter === null ? ' active' : '') + '" data-all="1"><span class="dot"></span>全部 <b>' + visible.length + '</b></div>'
       + cats.map(c => {
-          const key = c.color + '\u0000' + c.tag;
+          const key = commentCategoryKey(c.color, c.tag);
           const activeCls = activeFilter === key ? ' active' : '';
           return `<div class="cm-stat cm-chip${activeCls}" data-color="${c.color}" data-tag="${escapeHtml(c.tag)}"><span class="dot ${c.color}"></span>${escapeHtml(c.tag)} <b>${c.count}</b></div>`;
         }).join('');
@@ -727,7 +870,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       const st = commentStatus(c.cmid);
       if(st === 'ignored') continue;
       if(activeFilter){
-        const key = (c.color || 'format') + '\u0000' + (c.tag || '格式问题');
+        const key = commentCategoryKey(c.color, c.tag);
         if(key !== activeFilter) continue;
       }
       const card = document.createElement('div');
@@ -751,7 +894,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
         <div class="cm-foot">
           <span class="cm-actions">
             <button type="button" class="cm-act cm-resolve" data-cmid="${c.cmid}">${resolved ? '收起' : '已解决'}</button>
-            <button type="button" class="cm-act cm-ignore" data-cmid="${c.cmid}">忽略</button>
+            <button type="button" class="cm-act cm-ignore" data-cmid="${c.cmid}">忽略该问题</button>
+            <button type="button" class="cm-act cm-ignore-category" data-cmid="${c.cmid}" title="本次不再提醒该分类下的问题">忽略此类问题</button>
           </span>
         </div>`;
       list.appendChild(card);
@@ -764,7 +908,23 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   // ==================================================================
   const commentState = new Map();
   function isResolved(st){ return st === 'resolved-hidden' || st === 'resolved-shown'; }
-  function commentStatus(cmid){ return commentState.get(cmid) || 'open'; }
+  // 分类忽略只在本次检查中有效，不写入单条批注状态或持久化存储。
+  const ignoredCategories = new Set();
+  const commentCategories = new Map();
+  function commentCategoryKey(color, tag){ return (color || 'format') + '\u0000' + (tag || '格式问题'); }
+  function commentStatus(cmid){
+    if(ignoredCategories.has(commentCategories.get(cmid))) return 'ignored';
+    return commentState.get(cmid) || 'open';
+  }
+  function resetIgnoredCategories(){
+    ignoredCategories.clear();
+    commentCategories.clear();
+    activeFilter = null;
+  }
+  function startCheck(){
+    resetIgnoredCategories();
+    runCheck();
+  }
 
   // 检测范围：full = 全文检测；refs = 仅检测参考文献（隐藏正文，仅检测参考文献格式）
   // 带有正文输入框的页面（index.html）固定为全文检测；无正文框的页面（格式检查独立页）固定为仅检查格式
@@ -796,6 +956,12 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     commentState.set(cmid, 'ignored');
     runCheck();
   }
+  function ignoreCommentCategory(cmid){
+    const category = commentCategories.get(cmid);
+    if(!category) return;
+    ignoredCategories.add(category);
+    runCheck();
+  }
   function revealFromGreen(cmid){
     const st = commentStatus(cmid);
     if(isResolved(st)){
@@ -811,6 +977,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   // 主检测流程（计算 + 构建文档与批注）
   // ==================================================================
   function runCheck(){
+    sourceSearchSerial++;
+    clearSourceSearchMarks();
     const refOnly = (checkMode === 'refs');
     const body = refOnly ? '' : document.getElementById('txtBody').value;
     const bodyNorm = body.replace(/\r\n/g, "\n");
@@ -829,7 +997,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     }
 
     // 仅检测参考文献模式：不解析正文，跳过所有与正文相关的检测
-    const rawCites = refOnly ? [] : extractCitationsFromBody(bodyNorm);
+    const rawCites = refOnly ? [] : extractCitationsFromBody(bodyNorm, parsedRefs);
     const citeKeyItems = [];
     for(const c of rawCites){
       const keys = buildKeys(c.authors, c.etal, c.year);
@@ -920,6 +1088,16 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       }
     }
 
+    // 每次重算都建立当前批注与分类的对应关系，供卡片和原文高亮共同使用。
+    commentCategories.clear();
+    missingCites.forEach((cite, i) => commentCategories.set('m' + i, commentCategoryKey('missing', '引用缺失')));
+    inTextComments.forEach((cm, i) => {
+      cm.cmid = 'y' + i;
+      commentCategories.set(cm.cmid, commentCategoryKey(cm.color, cm.tag));
+    });
+    unusedRefs.forEach(ref => commentCategories.set('u' + ref._idx, commentCategoryKey('unused', '未被引用')));
+    formatByIdx.forEach((fmt, i) => commentCategories.set('f' + i, commentCategoryKey('format', '格式问题')));
+
     // ---- 左侧文档：正文（带高亮） ----
     const bodyRanges = [];
     missingCites.forEach((cite, i) => {
@@ -931,7 +1109,6 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       }
     });
     inTextComments.forEach((cm, i) => {
-      cm.cmid = 'y' + i;
       if(cm.start != null){
         if(commentStatus(cm.cmid) === 'ignored') return;
         const hlCls = cm.color === 'style' ? 'hl-style' : 'hl-mismatch';
@@ -974,7 +1151,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
         const visibleIssueIds = issueIds.filter(id => commentStatus(id) !== 'ignored');
         const primaryId = visibleIssueIds.find(id => id[0] === 'f') || visibleIssueIds[0];
         li.classList.add('hl');
-        li.dataset.cmids = issueIds.join(' ');
+        li.dataset.cmids = visibleIssueIds.join(' ');
         if(primaryId) li.dataset.cmid = primaryId;
         if(!visibleIssueIds.length){
           li.classList.remove('hl');
@@ -984,7 +1161,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
           li.classList.add('hl-resolved');
           li.classList.remove('hl-unused', 'hl-format');
         } else {
-          li.classList.add(hasFormatIssues ? 'hl-format' : 'hl-unused');
+          li.classList.add(visibleIssueIds.some(id => id[0] === 'f') ? 'hl-format' : 'hl-unused');
         }
 
         if(isUnused){
@@ -1062,6 +1239,7 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     }
 
     showReview();
+    if(!sourceSearchBar.hidden && sourceSearchInput.value.trim()) searchSource();
   }
 
   // ==================================================================
@@ -1215,8 +1393,14 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     const bodyNorm = body.replace(/\r\n/g, "\n");
     const refBlocks = getReferenceBlocks();
 
+    const parsedRefs = refBlocks.map((b, i) => {
+      const pr = parseReferenceEntry(b.text);
+      if(pr){ pr._idx = i; pr.italics = b.italics; }
+      return pr;
+    }).filter(Boolean);
+
     // ① 文中引用出现次数（同一 作者+年份 合并）
-    const rawCites = extractCitationsFromBody(bodyNorm);
+    const rawCites = extractCitationsFromBody(bodyNorm, parsedRefs);
     const citeCount = new Map();
     for(const c of rawCites){
       const names = c.authors.map(a => normalizeSpace(a.surname).toLowerCase()).filter(Boolean);
@@ -1227,13 +1411,6 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       citeCount.set(key, item);
     }
     const citeList = [...citeCount.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-
-    // 解析参考文献
-    const parsedRefs = refBlocks.map((b, i) => {
-      const pr = parseReferenceEntry(b.text);
-      if(pr){ pr._idx = i; pr.italics = b.italics; }
-      return pr;
-    }).filter(Boolean);
 
     // ② 年份区间
     const years = [];
@@ -1282,15 +1459,26 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
     }
   })();
 
-  document.getElementById("btnCheck").addEventListener("click", runCheck);
+  document.getElementById("btnCheck").addEventListener("click", startCheck);
   document.getElementById("btnDeep").addEventListener("click", runDeepAnalysis);
   document.getElementById("btnDeepClose").addEventListener("click", hideDeepModal);
   document.querySelector("#deepModal .deep-modal-mask").addEventListener("click", hideDeepModal);
-  document.getElementById("btnExample").addEventListener("click", () => { fillExample(); runCheck(); });
+  document.getElementById("btnExample").addEventListener("click", () => { fillExample(); startCheck(); });
   document.getElementById("btnClear").addEventListener("click", clearAll);
   // 顶栏“编辑原文”按钮已移除；审阅视图中通过 docView 内的返回按钮回到编辑区
   const btnEditBack = document.getElementById("btnEditBack");
   if (btnEditBack) btnEditBack.addEventListener("click", showEdit);
+  document.getElementById('btnJumpReferences')?.addEventListener('click', () => {
+    jumpToReferences().catch(error => showImportMsg('err', '跳转参考文献失败：' + (error?.message || error)));
+  });
+  const reviewNav = document.querySelector('body > .cr-topbar');
+  function updateReviewOffset(){
+    const height = window.innerWidth <= 768 ? (reviewNav?.getBoundingClientRect().height || 0) : 0;
+    document.getElementById('docView').style.setProperty('--review-nav-height', height + 'px');
+  }
+  updateReviewOffset();
+  window.addEventListener('resize', updateReviewOffset);
+  if(reviewNav) new ResizeObserver(updateReviewOffset).observe(reviewNav);
 
   document.getElementById("btnImport").addEventListener("click", () => {
     document.getElementById("fileInput").click();
@@ -1377,6 +1565,12 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
       resolveToggle(resolveBtn.closest(".cm-card").dataset.cmid);
       return;
     }
+    const ignoreCategoryBtn = e.target.closest(".cm-ignore-category");
+    if(ignoreCategoryBtn){
+      e.stopPropagation();
+      ignoreCommentCategory(ignoreCategoryBtn.closest(".cm-card").dataset.cmid);
+      return;
+    }
     const ignoreBtn = e.target.closest(".cm-ignore");
     if(ignoreBtn){
       e.stopPropagation();
@@ -1415,6 +1609,8 @@ Policy has also begun to respond to these findings. The Ministry of Science (202
   // 统一工作区入口：接收首页已解析的正文、富文本参考文献和原文件定位信息。
   window.CitationReviewerPage = Object.freeze({
     applyWorkspaceDocument(d){
+      resetSourceSearch();
+      resetIgnoredCategories();
       d = d || {};
       if(d.sourceType === 'pdf'){
         applyPdfDocument({
